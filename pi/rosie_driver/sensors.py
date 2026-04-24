@@ -255,6 +255,34 @@ class VersionInfo:
     software: str = ""
 
 
+def format_model(raw_model: str) -> str:
+    """Convert raw GetVersion model field to a human-readable display name.
+
+    Examples:
+        'BotVacD4Connected,905-0499,,' -> 'BotVac D4 Connected'
+        'BotVacD6Connected,905-0500,,' -> 'BotVac D6 Connected'
+    """
+    if not raw_model:
+        return ""
+    # First comma-separated piece is the model id, rest is part number etc.
+    model_id = raw_model.split(",", 1)[0].strip()
+    if not model_id:
+        return raw_model.strip()
+    # Insert space at lower->upper transitions and letter->digit transitions:
+    # 'BotVacD4Connected' -> 'BotVac D4 Connected'
+    import re
+    spaced = re.sub(r'(?<=[a-z])(?=[A-Z])|(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Z])',
+                    ' ', model_id)
+    return spaced
+
+
+def format_firmware(raw_software: str) -> str:
+    """Convert '4,5,3,189,0' to '4.5.3.189.0'."""
+    if not raw_software:
+        return ""
+    return raw_software.strip().replace(",", ".")
+
+
 def get_version(serial: NeatoSerial) -> VersionInfo:
     """Read robot version info via GetVersion."""
     lines = serial.send_and_collect("GetVersion", "GetVersion", timeout=2.0)

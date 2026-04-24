@@ -79,11 +79,11 @@ DIAG_INTERVAL        = 30    # diagnostics publish cadence (seconds)
 # ---------------------------------------------------------------------------
 # Helper: HA discovery device block (must match mqtt_bridge.py)
 # ---------------------------------------------------------------------------
-_DEVICE = {
+_DEFAULT_DEVICE = {
     "identifiers": ["rosie_neato_d6"],
     "name": "ROSie",
     "manufacturer": "Neato Robotics",
-    "model": "BotVac D6 Connected",
+    "model": "BotVac (detecting...)",
 }
 
 
@@ -100,6 +100,10 @@ class MapPipeline:
         self._mqtt = mqtt
         self._map_dir = Path(map_dir)
         self._pfx = mqtt._prefix
+
+        # Per-instance device dict (mirrors mqtt_bridge); updated when the
+        # driver calls update_device_info() after reading GetVersion.
+        self._device = dict(_DEFAULT_DEVICE)
 
         # ── Pipeline state ────────────────────────────────────────────────
         self._status = IDLE
@@ -669,7 +673,7 @@ class MapPipeline:
 
     def _pub_discovery(self, component: str, object_id: str, config: dict) -> None:
         pfx = self._pfx
-        config.setdefault("device", _DEVICE)
+        config.setdefault("device", self._device)
         config.setdefault("availability", [{
             "topic": f"{pfx}/availability",
             "payload_available": "online",
@@ -679,6 +683,22 @@ class MapPipeline:
             f"homeassistant/{component}/rosie_{object_id}/config",
             json.dumps(config), qos=1, retain=True,
         )
+
+    def update_device_info(self, model: Optional[str] = None,
+                           hw_version: Optional[str] = None) -> None:
+        """Update the device block and re-publish pipeline HA discovery."""
+        changed = False
+        if model and model != self._device.get("model"):
+            self._device["model"] = model
+            changed = True
+        if hw_version and hw_version != self._device.get("hw_version"):
+            self._device["hw_version"] = hw_version
+            changed = True
+        if changed:
+            try:
+                self._publish_ha_discovery()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Re-publishing pipeline HA discovery failed: %s", exc)
 
     def _publish_ha_discovery(self) -> None:
         pfx = self._pfx

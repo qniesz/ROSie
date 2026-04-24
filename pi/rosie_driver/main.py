@@ -23,7 +23,7 @@ import time
 from .serial_handler import NeatoSerial
 from .lidar import get_lidar_scan
 from .odometry import OdomState, get_motors, update_odometry
-from .sensors import get_battery, get_bumpers, get_robot_state, get_user_settings, get_version
+from .sensors import get_battery, get_bumpers, get_robot_state, get_user_settings, get_version, format_model, format_firmware
 from .commands import handle_command, handle_cmd_vel
 from .mqtt_bridge import MQTTBridge
 from . import no_go_guard
@@ -403,6 +403,20 @@ def main() -> None:
                         version.model, version.software)
         else:
             logger.warning("Could not read serial number — SetEvent commands disabled")
+
+        # Update HA device info with the actual model + firmware from the robot
+        if version.model or version.software:
+            display_model = format_model(version.model) or "BotVac"
+            firmware     = format_firmware(version.software)
+            try:
+                mqtt.update_device_info(model=display_model, hw_version=firmware)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not update MQTT device info: %s", exc)
+            if pipeline is not None:
+                try:
+                    pipeline.update_device_info(model=display_model, hw_version=firmware)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Could not update pipeline device info: %s", exc)
     except Exception as exc:
         logger.warning("SKey computation failed: %s — SetEvent commands disabled", exc)
 

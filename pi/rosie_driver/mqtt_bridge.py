@@ -35,12 +35,13 @@ import paho.mqtt.client as mqtt
 
 logger = logging.getLogger(__name__)
 
-# Device block shared by all entities
-_DEVICE = {
+# Device block shared by all entities. Model and sw_version are placeholders
+# until update_device_info() is called with real values from GetVersion.
+_DEFAULT_DEVICE = {
     "identifiers": ["rosie_neato_d6"],
     "name": "ROSie",
     "manufacturer": "Neato Robotics",
-    "model": "BotVac D6 Connected",
+    "model": "BotVac (detecting...)",
     "sw_version": "rosie-driver 0.2.0",
 }
 
@@ -59,6 +60,9 @@ class MQTTBridge:
         self._host = host
         self._port = port
         self._prefix = prefix
+
+        # Per-instance device dict so it can be updated from robot version info
+        self._device = dict(_DEFAULT_DEVICE)
 
         self._client = mqtt.Client(
             client_id="rosie-pi-driver",
@@ -316,12 +320,34 @@ class MQTTBridge:
 
     def _pub_discovery(self, component: str, object_id: str, config: dict):
         """Publish a single HA MQTT discovery config."""
-        config.setdefault("device", _DEVICE)
+        config.setdefault("device", self._device)
         config.setdefault("availability", self._availability())
         self._client.publish(
             f"homeassistant/{component}/rosie_{object_id}/config",
             json.dumps(config), qos=1, retain=True,
         )
+
+    def update_device_info(self, model: Optional[str] = None,
+                           hw_version: Optional[str] = None) -> None:
+        """Update the HA device block with values read from the robot.
+
+        Republishes all HA discovery configs so the new model/firmware
+        appears in the HA Devices panel without restarting HA.
+        """
+        changed = False
+        if model and model != self._device.get("model"):
+            self._device["model"] = model
+            changed = True
+        if hw_version and hw_version != self._device.get("hw_version"):
+            self._device["hw_version"] = hw_version
+            changed = True
+        if changed:
+            logger.info("Updated HA device info: model=%s hw=%s",
+                        self._device.get("model"), self._device.get("hw_version"))
+            try:
+                self._publish_ha_discovery()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Re-publishing HA discovery failed: %s", exc)
 
     def _publish_ha_discovery(self) -> None:
         """Publish all HA MQTT Discovery configs."""
