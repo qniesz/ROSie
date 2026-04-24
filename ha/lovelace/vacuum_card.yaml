@@ -1,0 +1,95 @@
+# ROSie — Lovelace Dashboard Card
+#
+# Add this card YAML to your HA Lovelace dashboard (manual edit or UI).
+# Requires: button-card (HACS) for the styled buttons.
+# Works fine with the default entities card if you don't want HACS deps.
+#
+# ── Simple version (no HACS required) ──────────────────────────────
+
+type: vertical-stack
+cards:
+  # Status card
+  - type: entities
+    title: ROSie
+    show_header_toggle: false
+    entities:
+      - entity: vacuum.rosie
+        name: Status
+      - type: attribute
+        entity: vacuum.rosie
+        attribute: battery_level
+        name: Battery
+        icon: mdi:battery
+        suffix: "%"
+
+  # Control buttons
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: Start
+        icon: mdi:play
+        tap_action:
+          action: call-service
+          service: vacuum.start
+          target:
+            entity_id: vacuum.rosie
+
+      - type: button
+        name: Pause
+        icon: mdi:pause
+        tap_action:
+          action: call-service
+          service: vacuum.pause
+          target:
+            entity_id: vacuum.rosie
+
+      - type: button
+        name: Stop
+        icon: mdi:stop
+        tap_action:
+          action: call-service
+          service: vacuum.stop
+          target:
+            entity_id: vacuum.rosie
+
+      - type: button
+        name: Dock
+        icon: mdi:home
+        tap_action:
+          action: call-service
+          service: vacuum.return_to_base
+          target:
+            entity_id: vacuum.rosie
+
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: Locate
+        icon: mdi:map-marker
+        tap_action:
+          action: call-service
+          service: vacuum.locate
+          target:
+            entity_id: vacuum.rosie
+
+      - type: button
+        name: Spot Clean
+        icon: mdi:target
+        tap_action:
+          action: call-service
+          service: vacuum.clean_spot
+          target:
+            entity_id: vacuum.rosie
+
+  # Battery gauge
+  - type: gauge
+    entity: vacuum.rosie
+    attribute: battery_level
+    name: Battery
+    unit: "%"
+    min: 0
+    max: 100
+    severity:
+      red: 15
+      yellow: 40
+      green: 60

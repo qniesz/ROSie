@@ -1,0 +1,11 @@
+[Unit]
+Description=ROSie daily update availability check
+
+[Timer]
+# Check once per day at a random time (to spread load, avoid peak hours).
+OnCalendar=daily
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

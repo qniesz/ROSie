@@ -1,0 +1,29 @@
+# ROSie ROS 2 Server — Single Container
+#
+# One container runs everything: bridge + foxglove + SLAM/Nav2 (toggled
+# internally by the map pipeline supervisor).
+#
+# Usage:
+#   docker compose up -d                # Start ROSie server
+#   docker compose logs -f rosie        # Follow logs
+#   docker compose up -d --build        # Rebuild and restart
+
+services:
+  rosie:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rosie
+    hostname: rosie
+    network_mode: host
+    environment:
+      - ROS_DOMAIN_ID=0
+      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+      - FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+      - MQTT_HOST=${MQTT_HOST}
+      - MQTT_PORT=${MQTT_PORT:-1883}
+      - MQTT_USER=${MQTT_USER}
+      - MQTT_PASS=${MQTT_PASS}
+    volumes:
+      - ./maps:/ros2_ws/maps
+    restart: unless-stopped

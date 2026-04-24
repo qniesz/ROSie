@@ -1,0 +1,3 @@
+# ROSie: allow software update service to restart the driver without a password.
+# Install to /etc/sudoers.d/rosie (chmod 440).
+rosie ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart rosie

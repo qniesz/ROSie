@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>rosie_driver</name>
+  <version>0.3.0</version>
+  <description>ROSie Neato D6 Pi-side ROS 2 driver node.
+
+  Reads wheel encoders and LIDAR directly from the Neato serial port and
+  publishes /scan (LaserScan) and /odom (Odometry) with correct capture-time
+  timestamps via DDS.  Also bridges HA MQTT integration (battery, state,
+  settings, commands) and manages the no-go guard GPIO injection.
+  </description>
+  <maintainer email="rosie@localhost.local">rosie</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>rosie_msgs</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

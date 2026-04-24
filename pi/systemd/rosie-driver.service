@@ -1,0 +1,24 @@
+[Unit]
+Description=ROSie Neato D6 Pi Driver
+After=network-online.target pigpiod.service
+Wants=network-online.target
+Requires=pigpiod.service
+
+[Service]
+Type=simple
+User=rosie
+WorkingDirectory=/home/rosie/rosie/pi
+ExecStart=/home/rosie/rosie-venv/bin/python3 -m rosie_driver \
+    --port /dev/neato \
+    --mqtt-host ${MQTT_HOST} \
+    --mqtt-port ${MQTT_PORT} \
+    --mqtt-user ${MQTT_USER} \
+    --mqtt-pass ${MQTT_PASS}
+EnvironmentFile=/home/rosie/rosie-driver.env
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

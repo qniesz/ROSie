@@ -1,0 +1,78 @@
+# ROSie — Multi-Container Pi 4 Stack
+#
+# Two services for fast development iteration:
+#
+#   rosie-driver  — Neato D6 serial driver + GPIO/HAL hardware
+#   rosie-nav     — Nav2/SLAM/Foxglove supervisor + map pipeline
+#
+# Both use host networking so ROS 2 DDS discovery works automatically.
+# Only rosie-driver needs privileged access (serial + GPIO).
+#
+# Build context is the repo root (..):
+#
+#   docker compose build                      # build both
+#   docker compose up -d                      # start both
+#   docker compose up -d --build rosie-driver # rebuild driver only (~2 min)
+#   docker compose up -d --build rosie-nav    # rebuild nav only (~4 min)
+#   docker compose restart rosie-nav          # reload rosie_server.py / clean_map.py (no rebuild)
+#   docker compose logs -f rosie-driver       # driver logs
+#   docker compose logs -f rosie-nav          # nav/server logs
+
+services:
+
+  # ── Neato D6 hardware driver ──────────────────────────────────────────────
+  rosie-driver:
+    build:
+      context: ..
+      dockerfile: pi/driver/Dockerfile
+    container_name: rosie-driver
+    hostname: rosie-driver
+    network_mode: host
+    privileged: true
+    devices:
+      - /dev/ttyACM0:/dev/ttyACM0
+      - /dev/gpiomem:/dev/gpiomem
+    environment:
+      - ROS_DOMAIN_ID=0
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - NEATO_PORT=/dev/ttyACM0
+      - NEATO_BAUD=115200
+      - MQTT_HOST=${MQTT_HOST:?MQTT_HOST must be set in .env}
+      - MQTT_PORT=${MQTT_PORT:-1883}
+      - MQTT_USER=${MQTT_USER:?MQTT_USER must be set in .env}
+      - MQTT_PASS=${MQTT_PASS:?MQTT_PASS must be set in .env}
+      - MQTT_PREFIX=${MQTT_PREFIX:-rosie}
+      - ROSIE_NOGO_ENABLED=${ROSIE_NOGO_ENABLED:-1}
+      - ROSIE_NOGO_LINES_FILE=/data/nogo-lines.json
+    volumes:
+      - /home/rosie/nogo-lines.json:/data/nogo-lines.json
+    restart: unless-stopped
+
+  # ── Nav2 / SLAM / Foxglove supervisor ────────────────────────────────────
+  rosie-nav:
+    build:
+      context: ..
+      dockerfile: pi/nav/Dockerfile
+    container_name: rosie-nav
+    hostname: rosie-nav
+    network_mode: host
+    environment:
+      - ROS_DOMAIN_ID=0
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - MQTT_HOST=${MQTT_HOST:?MQTT_HOST must be set in .env}
+      - MQTT_PORT=${MQTT_PORT:-1883}
+      - MQTT_USER=${MQTT_USER:?MQTT_USER must be set in .env}
+      - MQTT_PASS=${MQTT_PASS:?MQTT_PASS must be set in .env}
+      - MQTT_PREFIX=${MQTT_PREFIX:-rosie}
+    volumes:
+      - maps:/ros2_ws/maps
+      # Bind-mount Python scripts from repo — changes take effect with
+      # "docker compose restart rosie-nav", no image rebuild needed.
+      - ../server/rosie_server.py:/ros2_ws/rosie_server.py
+      - ../server/clean_map.py:/ros2_ws/clean_map.py
+    restart: unless-stopped
+
+volumes:
+  maps:
+    # Named volume so maps survive container rebuilds.
+

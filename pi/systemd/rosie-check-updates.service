@@ -1,0 +1,12 @@
+[Unit]
+Description=ROSie check for available software updates
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=rosie
+ExecStart=/home/rosie/rosie/pi/check_updates.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=60

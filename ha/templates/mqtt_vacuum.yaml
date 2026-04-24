@@ -1,0 +1,64 @@
+# ROSie — MQTT Vacuum Entity for Home Assistant
+#
+# Paste the content below into your configuration.yaml under the mqtt: key:
+#
+#   mqtt:
+#     vacuum:
+#       - name: "ROSie"
+#         ...
+#
+# Then restart HA (Settings → System → Restart).
+
+vacuum:
+  - name: "ROSie"
+    unique_id: rosie_vacuum
+
+    # Commands → published to rosie/command
+    command_topic: "rosie/command"
+    payload_start: "start"
+    payload_stop: "stop"
+    payload_pause: "pause"
+    payload_return_to_base: "return_to_base"
+    payload_locate: "locate"
+    payload_clean_spot: "clean_spot"
+
+    # State ← derived from rosie/state JSON
+    state_topic: "rosie/state"
+    value_template: >-
+      {% set ui = value_json.ui_state | default('') %}
+      {% set err = value_json.error | default('') %}
+      {% if err and err != '0' and err != '' %}
+        error
+      {% elif 'Cleaning' in ui or 'Clean' in ui %}
+        cleaning
+      {% elif 'Docked' in ui or 'Charging' in ui or 'Base' in ui %}
+        docked
+      {% elif 'Paused' in ui %}
+        paused
+      {% elif 'Return' in ui or 'GoToBase' in ui %}
+        returning
+      {% else %}
+        idle
+      {% endif %}
+
+    # Battery ← from rosie/battery JSON
+    battery_level_topic: "rosie/battery"
+    battery_level_template: "{{ value_json.fuel_percent | int }}"
+    charging_topic: "rosie/battery"
+    charging_template: "{{ value_json.charging }}"
+
+    # Availability
+    availability:
+      - topic: "rosie/availability"
+        payload_available: "online"
+        payload_not_available: "offline"
+
+    # Fan speed (eco vs normal)
+    fan_speed_list:
+      - "eco"
+      - "normal"
+    set_fan_speed_topic: "rosie/command"
+
+    json_attributes_topic: "rosie/state"
+
+    icon: mdi:robot-vacuum

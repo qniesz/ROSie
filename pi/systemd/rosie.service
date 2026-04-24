@@ -1,0 +1,33 @@
+[Unit]
+Description=ROSie — Neato D6 driver + map pipeline (Pi Zero 2 W)
+After=network-online.target pigpiod.service
+Wants=network-online.target
+Requires=pigpiod.service
+
+[Service]
+Type=simple
+User=rosie
+WorkingDirectory=/home/rosie/rosie/pi
+
+ExecStart=/home/rosie/rosie-venv/bin/python3 -m rosie_driver \
+    --port ${ROSIE_SERIAL_PORT} \
+    --mqtt-host ${MQTT_HOST} \
+    --mqtt-port ${MQTT_PORT} \
+    --mqtt-user ${MQTT_USER} \
+    --mqtt-pass ${MQTT_PASS}
+
+EnvironmentFile=/home/rosie/rosie-driver.env
+
+# Map storage — clean_map.py + dock.json live here
+Environment=ROSIE_MAP_DIR=/home/rosie/maps
+
+# Enable the unified map pipeline (set to 0 to disable on Pi 4 deploys)
+Environment=ROSIE_MAP_PIPELINE_ENABLED=1
+
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

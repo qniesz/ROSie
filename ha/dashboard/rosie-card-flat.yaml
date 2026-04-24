@@ -1,0 +1,503 @@
+# ROSie Vacuum Dashboard — No browser_mod required
+# Requires: custom:button-card (HACS)
+#
+# How to install:
+#   1. Install HACS if not already: https://hacs.xyz
+#   2. In HACS → Frontend → Search "button-card" → Install
+#   3. Restart HA
+#   4. In HA → Dashboard → Edit → Add Card → Manual YAML → paste this file
+#
+# All sections are inline (no popups). For popups, install browser_mod
+# and use rosie-card.yaml instead.
+
+type: vertical-stack
+cards:
+  # ============================================================
+  # HERO: Robot status icon + battery + docked indicator
+  # ============================================================
+  - type: custom:button-card
+    entity: sensor.rosie_robot_error
+    icon: mdi:robot-vacuum-variant
+    size: 40%
+    color_type: icon
+    tap_action:
+      action: more-info
+    name: |
+      [[[
+        const ui = states['sensor.rosie_ui_state']?.state || '';
+        if (ui.includes('STATE_IDLE')) return 'IDLE';
+        if (ui.includes('STATE_STANDBY')) return 'STANDBY';
+        if (ui.includes('STATE_TESTMODE')) return 'Test Mode';
+        if (ui.includes('STARTHOUSECLEAN')) return 'Starting Clean';
+        if (ui.includes('HOUSECLEANINGRUNNING')) return 'Cleaning House';
+        if (ui.includes('HOUSECLEANINGPAUSED')) return 'Paused';
+        if (ui.includes('STARTSPOTCLEAN')) return 'Starting Spot';
+        if (ui.includes('SPOTCLEANINGRUNNING')) return 'Spot Cleaning';
+        if (ui.includes('SPOTCLEANINGPAUSED')) return 'Spot Paused';
+        if (ui.includes('DOCKING')) return 'Returning';
+        return ui || 'Unknown';
+      ]]]
+    styles:
+      icon:
+        - color: |
+            [[[
+              const err = states['sensor.rosie_robot_error']?.state || '';
+              if (err !== 'none' && err !== '') return '#950606';
+              const alert = states['sensor.rosie_robot_alert']?.state || '';
+              if (alert !== 'none' && alert !== '') return '#edb926';
+              return '#00cc00';
+            ]]]
+      card:
+        - border-radius: 20px
+        - position: relative
+        - padding: 16px 16px 12px
+      custom_fields:
+        battery:
+          - position: absolute
+          - top: 8px
+          - right: 8px
+          - padding: 4px 8px
+          - border-radius: 8px
+          - font-weight: bold
+          - font-size: 14px
+          - background-color: |
+              [[[
+                const pct = Number(states['sensor.rosie_battery']?.state);
+                return pct > 35 ? 'rgb(124, 252, 0)' : 'rgb(255, 140, 0)';
+              ]]]
+          - color: black
+          - animation: |
+              [[[
+                if (states['binary_sensor.rosie_charging']?.state !== 'on') return '';
+                const pct = Number(states['sensor.rosie_battery']?.state);
+                return pct > 35 ? 'pulseGreen 3s infinite' : 'pulseOrange 3s infinite';
+              ]]]
+        dock:
+          - position: absolute
+          - top: 8px
+          - left: 8px
+          - padding: 4px 8px
+          - border-radius: 8px
+          - font-size: 12px
+          - background-color: "rgba(255,255,255,0.15)"
+          - display: |
+              [[[
+                return states['binary_sensor.rosie_docked']?.state === 'on'
+                  ? 'block' : 'none';
+              ]]]
+    custom_fields:
+      battery: |
+        [[[
+          return (states['sensor.rosie_battery']?.state ?? '0') + '%';
+        ]]]
+      dock: |
+        [[[
+          return states['binary_sensor.rosie_docked']?.state === 'on'
+            ? '⚡ DOCKED' : '';
+        ]]]
+    extra_styles: |
+      @keyframes pulseGreen {
+        0%   { box-shadow: 0 0 5px 0    rgba(124, 252, 0, 0.6); }
+        50%  { box-shadow: 0 0 20px 6px rgba(124, 252, 0, 1.0); }
+        100% { box-shadow: 0 0 5px 0    rgba(124, 252, 0, 0.6); }
+      }
+      @keyframes pulseOrange {
+        0%   { box-shadow: 0 0 5px 0    rgba(255, 140, 0, 0.6); }
+        50%  { box-shadow: 0 0 20px 6px rgba(255, 140, 0, 1.0); }
+        100% { box-shadow: 0 0 5px 0    rgba(255, 140, 0, 0.6); }
+      }
+
+  # ============================================================
+  # ALERTS ROW
+  # ============================================================
+  - type: horizontal-stack
+    cards:
+      - type: custom:button-card
+        entity: sensor.rosie_robot_alert
+        show_icon: false
+        show_state: false
+        styles:
+          card:
+            - border-color: |
+                [[[
+                  const v = entity?.state || '';
+                  return (v === 'none' || v === '') ? 'var(--ha-card-border-color, var(--divider-color))' : '#edb926';
+                ]]]
+            - font-size: 13px
+        name: |
+          [[[
+            const v = entity?.state || '';
+            if (v === 'none' || v === '') return '✅ No alerts';
+            try { return '⚠️ ' + v.match(/\(UI_ALERT_(.+)\)/)[1].replaceAll('_',' '); }
+            catch { return '⚠️ ' + v; }
+          ]]]
+      - type: custom:button-card
+        entity: sensor.rosie_robot_error
+        show_icon: false
+        show_state: false
+        styles:
+          card:
+            - border-color: |
+                [[[
+                  const v = entity?.state || '';
+                  return (v === 'none' || v === '') ? 'var(--ha-card-border-color, var(--divider-color))' : '#950606';
+                ]]]
+            - font-size: 13px
+        name: |
+          [[[
+            const v = entity?.state || '';
+            if (v === 'none' || v === '') return '✅ No errors';
+            try { return '🛑 ' + v.match(/\(UI_ERROR_(.+)\)/)[1].replaceAll('_',' '); }
+            catch { return '🛑 ' + v; }
+          ]]]
+
+  # ============================================================
+  # CLEANING CONTROLS
+  # ============================================================
+  - type: horizontal-stack
+    cards:
+      # Clean / Resume
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: sensor.rosie_ui_state
+            state_not: UIMGR_STATE_HOUSECLEANINGRUNNING
+          - condition: state
+            entity: sensor.rosie_ui_state
+            state_not: UIMGR_STATE_SPOTCLEANINGRUNNING
+          - condition: state
+            entity: sensor.rosie_ui_state
+            state_not: UIMGR_STATE_HOUSECLEANINGPAUSED
+          - condition: state
+            entity: sensor.rosie_ui_state
+            state_not: UIMGR_STATE_SPOTCLEANINGPAUSED
+        card:
+          type: custom:button-card
+          entity: button.rosie_house_clean
+          name: Clean
+          icon: mdi:home
+          tap_action:
+            action: toggle
+      - type: conditional
+        conditions:
+          - condition: or
+            conditions:
+              - condition: state
+                entity: sensor.rosie_ui_state
+                state: UIMGR_STATE_HOUSECLEANINGPAUSED
+              - condition: state
+                entity: sensor.rosie_ui_state
+                state: UIMGR_STATE_SPOTCLEANINGPAUSED
+        card:
+          type: custom:button-card
+          entity: button.rosie_resume_cleaning
+          name: Resume
+          icon: mdi:play
+          tap_action:
+            action: toggle
+
+      # Pause (when running)
+      - type: conditional
+        conditions:
+          - condition: or
+            conditions:
+              - condition: state
+                entity: sensor.rosie_ui_state
+                state: UIMGR_STATE_HOUSECLEANINGRUNNING
+              - condition: state
+                entity: sensor.rosie_ui_state
+                state: UIMGR_STATE_SPOTCLEANINGRUNNING
+        card:
+          type: custom:button-card
+          entity: button.rosie_pause_cleaning
+          name: Pause
+          icon: mdi:pause
+          tap_action:
+            action: toggle
+
+      # Spot (when not cleaning)
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: sensor.rosie_ui_state
+            state_not: UIMGR_STATE_HOUSECLEANINGRUNNING
+          - condition: state
+            entity: sensor.rosie_ui_state
+            state_not: UIMGR_STATE_SPOTCLEANINGRUNNING
+          - condition: state
+            entity: sensor.rosie_ui_state
+            state_not: UIMGR_STATE_HOUSECLEANINGPAUSED
+          - condition: state
+            entity: sensor.rosie_ui_state
+            state_not: UIMGR_STATE_SPOTCLEANINGPAUSED
+        card:
+          type: custom:button-card
+          entity: button.rosie_spot_clean
+          name: Spot
+          icon: mdi:target
+          tap_action:
+            action: toggle
+
+      # STOP (when cleaning/paused)
+      - type: conditional
+        conditions:
+          - condition: or
+            conditions:
+              - condition: state
+                entity: sensor.rosie_ui_state
+                state: UIMGR_STATE_HOUSECLEANINGRUNNING
+              - condition: state
+                entity: sensor.rosie_ui_state
+                state: UIMGR_STATE_SPOTCLEANINGRUNNING
+              - condition: state
+                entity: sensor.rosie_ui_state
+                state: UIMGR_STATE_HOUSECLEANINGPAUSED
+              - condition: state
+                entity: sensor.rosie_ui_state
+                state: UIMGR_STATE_SPOTCLEANINGPAUSED
+        card:
+          type: custom:button-card
+          entity: button.rosie_stop_cleaning
+          name: STOP
+          icon: mdi:stop
+          styles:
+            icon:
+              - color: "#ff4444"
+          tap_action:
+            action: toggle
+
+      # Locate
+      - type: custom:button-card
+        entity: button.rosie_locate_robot
+        name: Locate
+        icon: mdi:volume-high
+        tap_action:
+          action: toggle
+
+      # Dock (only when not docked)
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: binary_sensor.rosie_docked
+            state: "off"
+        card:
+          type: custom:button-card
+          entity: button.rosie_send_to_base
+          name: Dock
+          icon: mdi:home-import-outline
+          tap_action:
+            action: toggle
+
+  # ============================================================
+  # SPOT CLEAN SIZE
+  # ============================================================
+  - type: entities
+    title: Spot Clean Size
+    show_header_toggle: false
+    entities:
+      - entity: number.rosie_spot_clean_width
+        name: Width (cm)
+        icon: mdi:arrow-left-right
+      - entity: number.rosie_spot_clean_height
+        name: Height (cm)
+        icon: mdi:arrow-up-down
+      - entity: button.rosie_spot_clean_hxw
+        name: Start Spot Clean (custom size)
+        icon: mdi:target
+
+  # ============================================================
+  # MANUAL DRIVING
+  # ============================================================
+  - type: vertical-stack
+    cards:
+      - type: markdown
+        content: "### 🕹️ Manual Driving"
+        card_mod:
+          style: |
+            ha-card { padding: 0 16px !important; }
+
+      # Row 1: Arc Left / Forward / Arc Right
+      - type: horizontal-stack
+        cards:
+          - type: custom:button-card
+            entity: button.rosie_arc_left
+            name: Arc L
+            icon: mdi:rotate-left
+            tap_action:
+              action: call-service
+              service: button.press
+              service_data:
+                entity_id: button.rosie_arc_left
+          - type: custom:button-card
+            entity: button.rosie_drive_forward
+            name: Forward
+            icon: mdi:arrow-up-bold
+            styles:
+              icon:
+                - color: "#4CAF50"
+            tap_action:
+              action: call-service
+              service: button.press
+              service_data:
+                entity_id: button.rosie_drive_forward
+          - type: custom:button-card
+            entity: button.rosie_arc_right
+            name: Arc R
+            icon: mdi:rotate-right
+            tap_action:
+              action: call-service
+              service: button.press
+              service_data:
+                entity_id: button.rosie_arc_right
+
+      # Row 2: Left / Stop / Right
+      - type: horizontal-stack
+        cards:
+          - type: custom:button-card
+            entity: button.rosie_turn_left
+            name: Left
+            icon: mdi:arrow-left-bold
+            tap_action:
+              action: call-service
+              service: button.press
+              service_data:
+                entity_id: button.rosie_turn_left
+          - type: custom:button-card
+            entity: button.rosie_drive_timeout
+            name: STOP
+            icon: mdi:stop-circle
+            styles:
+              icon:
+                - color: "#ff4444"
+            tap_action:
+              action: toggle
+          - type: custom:button-card
+            entity: button.rosie_turn_right
+            name: Right
+            icon: mdi:arrow-right-bold
+            tap_action:
+              action: call-service
+              service: button.press
+              service_data:
+                entity_id: button.rosie_turn_right
+
+      # Row 3: Start Manual / Backward / Stop Clean
+      - type: horizontal-stack
+        cards:
+          - type: custom:button-card
+            entity: button.rosie_start_manual_cleaning
+            name: Start
+            icon: mdi:play-circle
+            styles:
+              icon:
+                - color: "#4CAF50"
+            tap_action:
+              action: toggle
+          - type: custom:button-card
+            entity: button.rosie_drive_backward
+            name: Backward
+            icon: mdi:arrow-down-bold
+            tap_action:
+              action: call-service
+              service: button.press
+              service_data:
+                entity_id: button.rosie_drive_backward
+          - type: custom:button-card
+            entity: button.rosie_stop_cleaning
+            name: Stop
+            icon: mdi:stop
+            tap_action:
+              action: toggle
+
+  # ============================================================
+  # SETTINGS
+  # ============================================================
+  - type: entities
+    title: Robot Settings
+    show_header_toggle: false
+    state_color: true
+    entities:
+      - entity: select.rosie_navigation_mode
+        name: Navigation Mode
+      - entity: switch.rosie_eco_mode
+        name: Eco Mode
+      - entity: switch.rosie_wall_follower
+        name: Wall Follower
+      - entity: switch.rosie_intense_clean
+        name: Intense Clean
+      - entity: switch.rosie_bin_full_detect
+        name: Bin Full Detect
+      - entity: switch.rosie_led
+        name: LED
+      - entity: switch.rosie_click_sounds
+        name: Click Sounds
+      - entity: switch.rosie_melody_sounds
+        name: Melody Sounds
+      - entity: switch.rosie_warning_sounds
+        name: Warning Sounds
+
+  # ============================================================
+  # STATUS DETAILS
+  # ============================================================
+  - type: entities
+    title: Robot Status
+    show_header_toggle: false
+    entities:
+      - entity: sensor.rosie_battery
+        name: Battery
+      - entity: sensor.rosie_battery_voltage
+        name: Battery Voltage
+      - entity: sensor.rosie_battery_temperature
+        name: Battery Temperature
+      - entity: binary_sensor.rosie_charging
+        name: Charging
+      - entity: binary_sensor.rosie_docked
+        name: Docked
+      - entity: sensor.rosie_ui_state
+        name: UI State
+      - entity: sensor.rosie_robot_state
+        name: Robot State
+
+  # ============================================================
+  # UTILITY
+  # ============================================================
+  - type: horizontal-stack
+    cards:
+      - type: custom:button-card
+        entity: button.rosie_update_status
+        name: Refresh
+        icon: mdi:refresh
+        tap_action:
+          action: toggle
+      - type: custom:button-card
+        entity: button.rosie_clear_errors
+        name: Clear Err
+        icon: mdi:notification-clear-all
+        tap_action:
+          action: toggle
+      - type: custom:button-card
+        entity: button.rosie_shutdown_robot
+        name: Power Off
+        icon: mdi:power
+        styles:
+          icon:
+            - color: "#ff4444"
+        tap_action:
+          action: toggle
+        hold_action:
+          action: toggle
+          confirmation:
+            text: Are you sure you want to shut down the robot?
+      - type: custom:button-card
+        entity: button.rosie_reboot_robot
+        name: Reboot
+        icon: mdi:restart
+        styles:
+          icon:
+            - color: "#ff9800"
+        tap_action:
+          action: toggle
+        hold_action:
+          action: toggle
+          confirmation:
+            text: Are you sure you want to reboot the robot?

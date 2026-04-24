@@ -1,0 +1,14 @@
+[Unit]
+Description=ROSie weekly software update
+
+[Timer]
+# Fire every Sunday at 03:00 local time.
+# RandomizedDelaySec jitters up to 30 min so multiple Pis don't all hit
+# GitHub simultaneously.
+OnCalendar=Sun *-*-* 03:00:00
+RandomizedDelaySec=1800
+# If the Pi was off at 03:00, run as soon as it boots.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

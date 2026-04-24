@@ -1,0 +1,12 @@
+[Unit]
+Description=ROSie software update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=rosie
+ExecStart=/home/rosie/rosie/pi/update.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=600
