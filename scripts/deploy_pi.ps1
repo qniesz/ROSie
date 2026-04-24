@@ -115,10 +115,47 @@ $script:SudoNeedsPassword = $false  # set after probe
 
 Write-Host ""
 
+# --- Pre-flight: clear stale host key + handle KEX algorithm mismatch ---------
+# When a Pi is reflashed, its SSH host key changes; any previous entry in
+# ~/.ssh/known_hosts will block all SSH attempts. We silently clear it.
+# Also, modern Pi OS (Trixie+) defaults to KEX algorithms that the SSH.NET
+# library bundled with Posh-SSH does not support, so we make sure the Pi
+# accepts an older KEX before letting Posh-SSH connect.
+Write-Step "SSH pre-flight (clearing stale host key, checking KEX support)"
+$knownHosts = Join-Path $env:USERPROFILE ".ssh\known_hosts"
+if (Test-Path $knownHosts) {
+    & ssh-keygen -R $PiHost 2>&1 | Out-Null
+}
+
+# Probe Posh-SSH connectivity. If KEX negotiation fails, run a one-time
+# bootstrap via native ssh.exe (which supports modern KEX) to enable
+# legacy KEX algorithms on the Pi side.
+$Cred  = New-Object System.Management.Automation.PSCredential($PiUser, $PiPassSec)
+$probe = $null
+try {
+    $probe = New-SSHSession -ComputerName $PiHost -Credential $Cred -AcceptKey -ErrorAction Stop
+} catch {
+    if ($_.Exception.Message -match "Key exchange|kex|negotiation failed") {
+        Write-Warn "Posh-SSH cannot negotiate a key exchange with this Pi."
+        Write-Host "       Applying a one-time SSH compatibility fix on the Pi..." -ForegroundColor Gray
+        Write-Host "       You will be prompted for the Pi password by native ssh.exe:" -ForegroundColor Gray
+        $kexFix = "echo 'KexAlgorithms +diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha256,diffie-hellman-group14-sha256' | sudo tee /etc/ssh/sshd_config.d/99-legacy-kex.conf >/dev/null && sudo systemctl restart ssh && echo OK"
+        & ssh -o StrictHostKeyChecking=accept-new "$PiUser@$PiHost" $kexFix
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail "Could not apply SSH KEX fix via native ssh.exe (exit $LASTEXITCODE)."
+        }
+        Write-Host "       SSH compatibility fix applied." -ForegroundColor Gray
+    } else {
+        Write-Fail "Cannot reach ${PiHost}: $($_.Exception.Message)"
+    }
+}
+# Close probe session if it opened (we re-create it below for the real run)
+if ($probe) { Remove-SSHSession -SessionId $probe.SessionId | Out-Null }
+Write-OK
+
 # --- Connect ------------------------------------------------------------------
 Write-Step "Connecting to $PiHost"
 try {
-    $Cred           = New-Object System.Management.Automation.PSCredential($PiUser, $PiPassSec)
     $script:Session = New-SSHSession -ComputerName $PiHost -Credential $Cred -AcceptKey
     Write-OK
 } catch {
