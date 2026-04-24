@@ -103,7 +103,7 @@ $MqttHost    = Read-Host "  MQTT broker / HA IP (e.g. 192.168.x.x)"
 $MqttPort    = Read-Host "  MQTT port          (press Enter for 1883)"
 $MqttUser    = Read-Host "  MQTT username"
 $MqttPassSec = Read-Host "  MQTT password" -AsSecureString
-$GitTokenSec = Read-Host "  GitHub PAT          (press Enter if repo is public)" -AsSecureString
+$GitTokenSec = Read-Host "  GitHub PAT          (press Enter - repo is public)" -AsSecureString
 
 if ([string]::IsNullOrWhiteSpace($MqttPort)) { $MqttPort = "1883" }
 
@@ -232,9 +232,14 @@ try {
     Write-Step "Creating Python venv and installing packages"
     Write-Host "       (breezyslam compiles C - allow ~3 min on Pi Zero)" -ForegroundColor Gray
     # --system-site-packages reuses distro numpy/scipy/Pillow/pyserial/RPi.GPIO
-    # to avoid long compile times; pip adds paho-mqtt (pinned <2.0) and breezyslam.
+    # to avoid long compile times; pip adds paho-mqtt (pinned <2.0).
     Invoke-Pi "python3 -m venv --system-site-packages ~/rosie-venv" | Out-Null
-    Invoke-Pi '~/rosie-venv/bin/pip install -q "paho-mqtt>=1.6,<2.0" breezyslam' -TimeoutSec 600 | Out-Null
+    Write-Host "       installing paho-mqtt..." -ForegroundColor Gray
+    Invoke-Pi '~/rosie-venv/bin/pip install -q "paho-mqtt>=1.6,<2.0"' -TimeoutSec 300 | Out-Null
+    # BreezySLAM is not on PyPI for arm64 - build from source on GitHub.
+    # The Python C extension is built by setup.py during pip install.
+    Write-Host "       building BreezySLAM from source (this is the slow part)..." -ForegroundColor Gray
+    Invoke-Pi "~/rosie-venv/bin/pip install -q 'git+https://github.com/simondlevy/BreezySLAM.git#subdirectory=python'" -TimeoutSec 900 | Out-Null
     Write-OK
 
     # --- Maps directory -------------------------------------------------------
