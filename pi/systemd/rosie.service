@@ -1,8 +1,7 @@
 [Unit]
 Description=ROSie — Neato D6 driver + map pipeline (Pi Zero 2 W)
-After=network-online.target pigpiod.service
+After=network-online.target
 Wants=network-online.target
-Requires=pigpiod.service
 
 [Service]
 Type=simple
