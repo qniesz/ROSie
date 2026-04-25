@@ -78,6 +78,9 @@ SNAPSHOT_INTERVAL   = 0      # 0 = disabled. Live snapshots cost ~15 s of
                              # scan-matcher and producing fragmented maps.
                              # Set to e.g. 60 to re-enable on faster hardware.
 MAP_REFRESH_INTERVAL = 2     # overlay refresh cadence (seconds)
+LIVE_PREVIEW_INTERVAL = 3    # raw SLAM-grid preview cadence (seconds)
+                             # — cheap (~50 ms): no clean_map, no scipy,
+                             # just raw mapbytes → PIL → base64 PNG.
 DIAG_INTERVAL        = 30    # diagnostics publish cadence (seconds)
 
 
@@ -135,6 +138,7 @@ class MapPipeline:
         self._map_meta: Optional[dict] = None
         self._last_overlay_key = None
         self._last_map_refresh: float = 0.0
+        self._last_live_preview: float = 0.0
 
         # ── Diagnostics ───────────────────────────────────────────────────
         self._last_diag: float = 0.0
@@ -304,6 +308,7 @@ class MapPipeline:
         while not self._stop_event.is_set():
             try:
                 self._maybe_refresh_map()
+                self._maybe_publish_live_preview()
                 self._publish_diagnostics()
                 self._check_update_log()
             except Exception:
@@ -338,6 +343,32 @@ class MapPipeline:
             return
         self._last_overlay_key = key
         self._publish_map_with_markers()
+
+    def _maybe_publish_live_preview(self) -> None:
+        """Publish a cheap live SLAM grid + robot marker while mapping.
+
+        Only runs when the pipeline is actively building a map (MAPPING or
+        WAITING_FOR_DOCK).  The base clean_map render hasn't been produced
+        yet at this point, so _maybe_refresh_map() is intentionally inert
+        and this is what keeps the HA camera entity live.
+
+        Pulls the raw BreezySLAM grid (~50 ms), classifies cells into
+        wall / free / unknown, draws dock + robot markers, and publishes
+        as a base64 PNG to the same `map_image` topic the final map uses.
+        """
+        if self._status not in (MAPPING, WAITING_FOR_DOCK):
+            return
+        if not self._slam_active:
+            return
+        now = time.monotonic()
+        if now - self._last_live_preview < LIVE_PREVIEW_INTERVAL:
+            return
+        self._last_live_preview = now
+
+        try:
+            self._publish_slam_preview()
+        except Exception:
+            logger.debug("live preview failed", exc_info=True)
 
     # =========================================================================
     # Diagnostics
@@ -552,6 +583,104 @@ class MapPipeline:
             logger.info("Live map snapshot published")
         except Exception:
             logger.debug("Live snapshot failed", exc_info=True)
+
+    def _publish_slam_preview(self) -> None:
+        """Cheap live preview: raw BreezySLAM grid + robot/dock markers.
+
+        Cost on Pi Zero 2 W: ~50 ms (no scipy, no upscaling, no PIL filters).
+        Designed to run every few seconds during MAPPING / WAITING_FOR_DOCK
+        so the HA camera entity tracks the vacuum live during a clean cycle.
+        """
+        try:
+            import numpy as np
+        except ImportError:
+            return
+
+        grid = _slam_mod.get_snapshot_array()
+        if grid is None:
+            return
+
+        # Classify cells into wall / unknown / free → RGB image.
+        # BreezySLAM raw codes after slam.update():
+        #   0           → wall OR border-connected unexplored (we treat as
+        #                 wall here for simplicity; final clean_map.py does
+        #                 the proper flood-fill at save time).
+        #   ~255 (high) → free / scanned floor
+        rows, cols = grid.shape
+        rgb = np.empty((rows, cols, 3), dtype=np.uint8)
+        # Default = unknown gray
+        rgb[:] = (210, 215, 222)
+        wall_mask = grid < 64
+        free_mask = grid > 190
+        rgb[free_mask] = (255, 255, 255)
+        rgb[wall_mask] = (50, 55, 65)
+
+        img = Image.fromarray(rgb, "RGB")
+
+        # Upscale 2× so the HA card has something readable to display
+        # (still tiny — 800 → 1600 px, ~4 MB RGB peak, well under budget).
+        img = img.resize((cols * 2, rows * 2), Image.NEAREST)
+
+        # ── Markers ───────────────────────────────────────────────────────
+        # Convert world (m) → preview-pixel coords.  slam.py world frame:
+        #   dock = (0,0); grid centre is world origin; row 0 (after the
+        #   row-flip in get_snapshot_array) = +y_max.
+        try:
+            map_size_px    = _slam_mod.MAP_SIZE_PIXELS
+            map_size_m     = _slam_mod.MAP_SIZE_METERS
+            resolution     = _slam_mod.RESOLUTION
+        except AttributeError:
+            return
+        half_m = map_size_m / 2.0
+        scale = 2  # we upscaled 2×
+
+        def world_to_px(x: float, y: float) -> tuple[int, int]:
+            col = int((x + half_m) / resolution)
+            row = int((half_m - y) / resolution)  # already row-flipped
+            return col * scale, row * scale
+
+        draw = ImageDraw.Draw(img)
+        # Dock
+        if self._dock_pose:
+            dx, dy = world_to_px(self._dock_pose[0], self._dock_pose[1])
+            r = 8
+            draw.ellipse([dx - r, dy - r, dx + r, dy + r],
+                         fill=DOCK_COLOUR, outline=(20, 120, 60), width=2)
+        # Robot
+        draw_pose = self._robot_pose
+        if self._is_docked() and self._dock_pose:
+            draw_pose = (self._dock_pose[0], self._dock_pose[1], 0.0)
+        if draw_pose:
+            rx, ry = world_to_px(draw_pose[0], draw_pose[1])
+            r = 7
+            draw.ellipse([rx - r, ry - r, rx + r, ry + r],
+                         fill=ROBOT_COLOUR, outline=(20, 70, 200), width=2)
+            theta = draw_pose[2]
+            tip = r * 1.8
+            tip_x = rx + tip * math.cos(theta)
+            tip_y = ry - tip * math.sin(theta)
+            lx = rx + r * 0.6 * math.cos(theta + 2.4)
+            ly = ry - r * 0.6 * math.sin(theta + 2.4)
+            rx2 = rx + r * 0.6 * math.cos(theta - 2.4)
+            ry2 = ry - r * 0.6 * math.sin(theta - 2.4)
+            draw.polygon([(tip_x, tip_y), (lx, ly), (rx2, ry2)],
+                         fill=(255, 255, 255))
+
+        # Watermark so it's obvious this is a live preview, not the final map
+        try:
+            font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
+        except (OSError, IOError):
+            font = ImageFont.load_default()
+        draw.text((10, 10), "LIVE — mapping in progress",
+                  fill=(220, 60, 60), font=font)
+
+        # Publish as JPEG to keep payload small (this fires every 3 s)
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=70, optimize=True)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        self._mqtt.publish("map_image", b64, qos=0, retain=True)
+
 
     def _run_clean_map(self, yaml_path: Path) -> None:
         """Run clean_map.py in a subprocess.

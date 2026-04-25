@@ -229,6 +229,31 @@ def get_position() -> tuple[float, float, float]:
     return x_world, y_world, theta_rad
 
 
+def get_snapshot_array():
+    """Return current SLAM grid as a numpy uint8 array oriented PGM-style
+    (row 0 = top = +y_max), or None if SLAM is not running.
+
+    Cheap: just copies the current mapbytes and flips rows. No flood-fill,
+    no morphology — meant for live HA preview at a few-Hz cadence.
+
+    Pixel codes (BreezySLAM raw):
+        0           → wall OR unexplored (indistinguishable here)
+        ~255 (high) → free / scanned floor
+    """
+    if _slam is None:
+        return None
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+
+    with _lock:
+        _slam.getmap(_mapbytes)
+    m = np.frombuffer(bytes(_mapbytes), dtype=np.uint8).copy()
+    m = m.reshape(MAP_SIZE_PIXELS, MAP_SIZE_PIXELS)
+    return m[::-1, :]  # flip rows so row 0 = top (PGM convention)
+
+
 def save_map(map_dir: Path) -> tuple[Path, Path]:
     """Save current SLAM state to home.pgm + home.yaml.
 
