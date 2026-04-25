@@ -32,9 +32,23 @@ WALL_COLOUR = (50, 55, 65)         # dark charcoal walls
 DOCK_COLOUR = (34, 170, 85)        # green dock marker
 ROBOT_COLOUR = (41, 121, 255)      # blue robot marker
 
-SCALE = 8                          # up-scale factor (raw 5cm pixels)
+SCALE = 4                          # up-scale factor (raw 5cm pixels)
+                                   # 4 keeps memory in budget on Pi Zero 2 W;
+                                   # auto-reduced further if grid is large
+                                   # (see _safe_scale below).
+MAX_OUTPUT_DIM = 2200              # cap for upscaled image side (px) — keeps
+                                   # peak RAM under ~150 MB on Pi Zero 2 W
 PADDING = 6                        # pixels of border around content
 BORDER = 4                         # border around final image
+
+
+def _safe_scale(grid_w: int, grid_h: int, requested_scale: int) -> int:
+    """Reduce scale so neither output dimension exceeds MAX_OUTPUT_DIM."""
+    side = max(grid_w, grid_h) * requested_scale
+    if side <= MAX_OUTPUT_DIM:
+        return requested_scale
+    capped = max(1, MAX_OUTPUT_DIM // max(grid_w, grid_h))
+    return capped
 
 
 def load_map_yaml(yaml_path: Path):
@@ -166,6 +180,14 @@ def clean_map(
     """Load a SLAM map, clean it up, and save a polished PNG + metadata JSON."""
     pgm_path, resolution, (ox, oy) = load_map_yaml(yaml_path)
     raw = np.array(Image.open(pgm_path).convert("L"))
+
+    # Cap effective scale based on input grid size to keep memory in check
+    h0, w0 = raw.shape
+    effective_scale = _safe_scale(w0, h0, scale)
+    if effective_scale != scale:
+        print(f"Scale auto-reduced: {scale} → {effective_scale} "
+              f"(grid {w0}×{h0}, cap {MAX_OUTPUT_DIM}px)")
+    scale = effective_scale
 
     # Classify pixels
     walls = raw < 64

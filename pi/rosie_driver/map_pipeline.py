@@ -36,6 +36,7 @@ import logging
 import math
 import os
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -71,7 +72,11 @@ BG_COLOUR    = (240, 245, 250)
 DEFAULT_MAP_DIR = Path(os.environ.get("ROSIE_MAP_DIR", "/home/rosie/maps"))
 
 PIPELINE_TIMEOUT    = 7200   # 2-hour hard limit on a clean cycle
-SNAPSHOT_INTERVAL   = 10     # live snapshot every 10 s during cleaning
+SNAPSHOT_INTERVAL   = 0      # 0 = disabled. Live snapshots cost ~15 s of
+                             # full-CPU clean_map work each time on a Pi
+                             # Zero 2 W (single core), starving the SLAM
+                             # scan-matcher and producing fragmented maps.
+                             # Set to e.g. 60 to re-enable on faster hardware.
 MAP_REFRESH_INTERVAL = 2     # overlay refresh cadence (seconds)
 DIAG_INTERVAL        = 30    # diagnostics publish cadence (seconds)
 
@@ -151,6 +156,13 @@ class MapPipeline:
         self._load_dock_pose()
         self._publish_ha_discovery()
         self._publish_status(IDLE)
+
+        # Recover from an interrupted mapping run (OOM kill, power loss).
+        # If a previous run was killed after SLAM had saved home.pgm but
+        # before clean_map produced home_clean.png, finish that step now
+        # so the user gets the map they just made instead of a placeholder.
+        self._maybe_recover_interrupted_pipeline()
+
         self._load_map_overlay_data()
         self._publish_map_meta()
         self._publish_map_with_markers()
@@ -162,6 +174,44 @@ class MapPipeline:
         )
         self._bg_thread.start()
         logger.info("MapPipeline started (map_dir=%s)", self._map_dir)
+
+    def _maybe_recover_interrupted_pipeline(self) -> None:
+        """If a previous pipeline run was killed mid-flight, try to finish."""
+        state = self._load_pipeline_state()
+        if not state:
+            return
+        prev = state.get("status")
+        age = time.time() - float(state.get("timestamp", 0))
+        logger.warning(
+            "Previous pipeline state was '%s' (%.0f s ago) — attempting recovery",
+            prev, age,
+        )
+
+        pgm = self._map_dir / "home.pgm"
+        yaml_path = self._map_dir / "home.yaml"
+        clean_png = self._map_dir / "home_clean.png"
+        meta_json = self._map_dir / "home_meta.json"
+
+        # Clear stale state file up-front so we don't loop on persistent failure
+        try:
+            self._pipeline_state_path().unlink()
+        except OSError:
+            pass
+
+        if pgm.exists() and yaml_path.exists() and not (clean_png.exists() and meta_json.exists()):
+            logger.info("Found %s but no clean output — running clean_map to finalize", pgm)
+            try:
+                self._run_clean_map(yaml_path)
+                logger.info("Recovery: clean_map succeeded")
+            except Exception as exc:
+                logger.error("Recovery: clean_map failed: %s", exc)
+                self._publish_status(
+                    ERROR,
+                    f"Recovery from interrupted '{prev}' failed: {exc}",
+                )
+                return
+
+        self._publish_status(IDLE, f"Recovered from interrupted '{prev}'")
 
     def stop(self) -> None:
         """Signal the background thread to exit and wait for it."""
@@ -177,9 +227,38 @@ class MapPipeline:
 
     def on_scan(self, scan, odom) -> None:
         """Feed a LidarScan + OdomState into BreezySLAM.
-        Only active while self._slam_active is True."""
-        if self._slam_active:
-            _slam_mod.update(scan, odom)
+        Only active while self._slam_active is True.
+
+        After each scan we pull the SLAM-corrected pose (lidar scan-matching
+        + odometry fusion) and use it as the authoritative robot pose for
+        the map overlay.  This is dramatically more accurate than raw wheel
+        odometry, which drifts heavily on carpet and after turns.
+        """
+        if not self._slam_active:
+            return
+        _slam_mod.update(scan, odom)
+
+        # Stationary scan averaging — when the robot is essentially stopped,
+        # re-imprint the same scan twice more with no pose change.  This is
+        # cheap pseudo loop-closure: walls solidify and noisy single hits
+        # get drowned out, with zero drift cost since the pose isn't moving.
+        # The robot pauses several times during docking/undocking so this
+        # runs naturally during a normal cleaning cycle.
+        try:
+            lin = abs(getattr(odom, "linear_vel", 0.0)) if odom else 0.0
+            ang = abs(getattr(odom, "angular_vel", 0.0)) if odom else 0.0
+            if lin < 0.02 and ang < 0.05:
+                _slam_mod.update(scan, None)
+                _slam_mod.update(scan, None)
+        except Exception:
+            logger.debug("stationary averaging failed", exc_info=True)
+
+        try:
+            x, y, theta = _slam_mod.get_position()
+            self._robot_pose = (x, y, theta)
+            self._pose_stamp = time.monotonic()
+        except Exception:
+            logger.debug("get_position failed", exc_info=True)
 
     def on_state(self, ui_state: Optional[str] = None,
                  ext_power: Optional[bool] = None) -> None:
@@ -191,10 +270,11 @@ class MapPipeline:
             self._ext_power = ext_power
 
     def on_odom(self, odom) -> None:
-        """Update robot pose from odometry (map-frame fallback)."""
+        """Update robot pose from odometry — used only as a fallback when
+        SLAM is not running (idle / pre-mapping) or its pose is stale."""
         self._odom_pose = (odom.x, odom.y, odom.theta)
         self._odom_stamp = time.monotonic()
-        # Use odom as robot_pose when SLAM pose is stale (>15 s)
+        # SLAM pose takes precedence whenever it's recent (<15 s old).
         if time.monotonic() - self._pose_stamp > 15:
             self._robot_pose = self._odom_pose
 
@@ -352,7 +432,10 @@ class MapPipeline:
         self._publish_status(MAPPING)
         _slam_mod.start()
         self._slam_active = True
-        self._save_dock_pose(0.0, 0.0)   # robot is at dock = world (0, 0)
+        # SLAM resets the world frame so robot (= on dock) is at (0, 0).
+        # Persist this immediately so overlay rendering during this run
+        # has a valid dock pose.  A clean re-dock at the end keeps it.
+        self._save_dock_pose(0.0, 0.0)
 
         # ── 3. Send 'start' to robot ──────────────────────────────────────
         self._ui_state = ""              # clear stale retained value
@@ -392,7 +475,8 @@ class MapPipeline:
                 break
 
             # Live snapshots every SNAPSHOT_INTERVAL s while cleaning
-            if was_cleaning:
+            # (disabled when SNAPSHOT_INTERVAL == 0 to free CPU for SLAM)
+            if was_cleaning and SNAPSHOT_INTERVAL > 0:
                 now = time.time()
                 if now - last_snapshot >= SNAPSHOT_INTERVAL:
                     last_snapshot = now
@@ -470,22 +554,42 @@ class MapPipeline:
             logger.debug("Live snapshot failed", exc_info=True)
 
     def _run_clean_map(self, yaml_path: Path) -> None:
-        """Run clean_map.py on the saved PGM."""
+        """Run clean_map.py in a subprocess.
+
+        Running it inline previously caused OOM kills on the Pi Zero 2 W
+        because peak RSS (numpy + PIL filters + scipy.ndimage on the
+        upscaled image) is briefly large.  A subprocess releases all of
+        that memory the moment it exits, even if the OS doesn't return
+        freed pages to the parent.
+        """
         out_png  = self._map_dir / "home_clean.png"
         meta_out = self._map_dir / "home_meta.json"
+        cmd = [
+            sys.executable, "-m", "rosie_driver.clean_map",
+            "--yaml", str(yaml_path),
+            "--out",  str(out_png),
+            "--meta", str(meta_out),
+        ]
         try:
-            from .clean_map import clean_map
-        except ImportError:
-            # Fallback: look for clean_map.py next to this file
-            import sys, importlib.util
-            spec = importlib.util.spec_from_file_location(
-                "clean_map",
-                Path(__file__).parent / "clean_map.py",
+            res = subprocess.run(
+                cmd,
+                capture_output=True, text=True,
+                timeout=180,
+                check=False,
             )
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            clean_map = mod.clean_map
-        clean_map(yaml_path=yaml_path, out_path=out_png, meta_path=meta_out)
+        except subprocess.TimeoutExpired:
+            logger.error("clean_map subprocess timed out after 180 s")
+            raise
+        if res.returncode != 0:
+            logger.error(
+                "clean_map subprocess failed (rc=%s)\nstdout: %s\nstderr: %s",
+                res.returncode, res.stdout.strip(), res.stderr.strip(),
+            )
+            raise RuntimeError(
+                f"clean_map exited {res.returncode}: {res.stderr.strip()[:200]}"
+            )
+        if res.stdout.strip():
+            logger.info("clean_map: %s", res.stdout.strip().splitlines()[-1])
 
     # =========================================================================
     # Dock pose
@@ -658,8 +762,45 @@ class MapPipeline:
     # Status publishing
     # =========================================================================
 
+    # Pipeline states that are worth persisting (i.e. mid-run, recoverable
+    # if the process is killed or the system reboots).
+    _PERSISTED_STATES = {MAPPING, WAITING_FOR_DOCK, SAVING, PROCESSING}
+
+    def _pipeline_state_path(self) -> Path:
+        return self._map_dir / "pipeline_state.json"
+
+    def _save_pipeline_state(self, status: str) -> None:
+        """Persist (or clear) the in-progress pipeline state to disk."""
+        p = self._pipeline_state_path()
+        try:
+            if status in self._PERSISTED_STATES:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(json.dumps({
+                    "status": status,
+                    "timestamp": time.time(),
+                }))
+            elif p.exists():
+                p.unlink()
+        except OSError as exc:
+            logger.debug("Could not write pipeline_state.json: %s", exc)
+
+    def _load_pipeline_state(self) -> Optional[dict]:
+        p = self._pipeline_state_path()
+        if not p.exists():
+            return None
+        try:
+            return json.loads(p.read_text())
+        except (OSError, ValueError) as exc:
+            logger.warning("Bad pipeline_state.json (%s) — ignoring", exc)
+            try:
+                p.unlink()
+            except OSError:
+                pass
+            return None
+
     def _publish_status(self, status: str, detail: str = "") -> None:
         self._status = status
+        self._save_pipeline_state(status)
         self._mqtt.publish(
             "map_pipeline/status",
             {"status": status, "detail": detail},

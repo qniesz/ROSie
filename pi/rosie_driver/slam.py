@@ -35,10 +35,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Tuning
 # ---------------------------------------------------------------------------
-# 12 m × 12 m at 500 × 500 pixels → ~2.4 cm / pixel.  Generous for a home.
-MAP_SIZE_PIXELS: int = 500
+# 12 m × 12 m at 800 × 800 pixels → ~1.5 cm / pixel.  Higher resolution
+# than the original 500-px grid; map buffer is still only ~640 KB so it
+# fits comfortably on the Pi Zero 2 W.  clean_map._safe_scale will auto-
+# drop SCALE so peak render RAM stays in budget.
+MAP_SIZE_PIXELS: int = 800
 MAP_SIZE_METERS: float = 12.0
-RESOLUTION: float = MAP_SIZE_METERS / MAP_SIZE_PIXELS  # ~0.024 m / pixel
+RESOLUTION: float = MAP_SIZE_METERS / MAP_SIZE_PIXELS  # ~0.015 m / pixel
 
 # ---------------------------------------------------------------------------
 # Module state
@@ -91,11 +94,18 @@ def start() -> None:
             laser,
             MAP_SIZE_PIXELS,
             MAP_SIZE_METERS,
-            map_quality=50,
-            hole_width_mm=600,
+            map_quality=50,           # lower quality + more passes self-averages
+                                       # better than high quality with any drift;
+                                       # 70 was double-painting offset walls into
+                                       # "blob constellations".
+            hole_width_mm=120,        # thinner wall paint (was 200) — less blob
+                                       # smearing when consecutive passes land
+                                       # at slightly different estimated poses.
             random_seed=42,
-            sigma_xy_mm=100,
-            sigma_theta_degrees=20,
+            sigma_xy_mm=30,           # trust odometry more (was 50) now that
+                                       # the pose_change feed uses signed
+                                       # forward distance (see update()).
+            sigma_theta_degrees=5,    # tighter rotation lock (was 10).
         )
         _mapbytes = bytearray(MAP_SIZE_PIXELS * MAP_SIZE_PIXELS)
         _odom_ready = False
@@ -122,15 +132,42 @@ def update(scan, odom) -> None:
     if _slam is None:
         return
 
-    # Convert scan ranges to mm integers (0 = no detection in BreezySLAM)
-    scan_mm = [
-        int(r * 1000)
-        if (math.isfinite(r) and 20.0 <= r * 1000.0 <= 5000.0)
-        else 0
-        for r in scan.ranges
-    ]
+    # ── Scan input filtering ──────────────────────────────────────────────
+    # 1) Intensity gate — drop returns the LDS reports as low-confidence
+    #    (glass, dark surfaces, very-distant) which are the main source of
+    #    phantom blobs floating away from real walls.
+    # 2) Median-of-3 smoother — kill single-bin range spikes.
+    INTENSITY_MIN = 100
+    raw_ranges = scan.ranges
+    intens = getattr(scan, "intensities", None)
+    n = len(raw_ranges)
+    cleaned = [0.0] * n
+    for i in range(n):
+        r = raw_ranges[i]
+        if not math.isfinite(r):
+            cleaned[i] = 0.0
+            continue
+        if intens is not None and i < len(intens) and intens[i] < INTENSITY_MIN:
+            cleaned[i] = 0.0
+            continue
+        cleaned[i] = r
 
-    # Compute pose change from odometry deltas
+    scan_mm = [0] * n
+    for i in range(n):
+        a = cleaned[i - 1] if i > 0 else cleaned[-1]
+        b = cleaned[i]
+        c = cleaned[i + 1] if i < n - 1 else cleaned[0]
+        # Median of 3 — but only count valid (>0) neighbours; if b is the
+        # only valid one keep it as-is (don't over-erase isolated walls).
+        vals = [v for v in (a, b, c) if v > 0.0]
+        if not vals:
+            continue
+        vals.sort()
+        r = vals[len(vals) // 2]
+        if 0.020 <= r <= 5.0:
+            scan_mm[i] = int(r * 1000)
+
+    # ── Pose change from odometry ─────────────────────────────────────────
     pose_change = None
     if odom is not None:
         now = odom.timestamp
@@ -146,8 +183,17 @@ def update(scan, odom) -> None:
                 dtheta += 2.0 * math.pi
 
             dt = now - _prev_time
-            if dt > 0.001:
-                dxy_mm = math.hypot(dx, dy) * 1000.0       # m → mm
+            # Skip stale deltas — a serial stall can hand us a huge dt with
+            # an equally huge dx/dy that BreezySLAM will happily believe.
+            if 0.001 < dt < 0.5:
+                # SIGNED forward distance along the previous heading.
+                # math.hypot(dx, dy) was unsigned, so any backward motion
+                # (undock, recovery, bump-back) was reported as forward to
+                # BreezySLAM and corrupted the pose track — this is the
+                # root cause of the offset-blob constellations.
+                forward_m = (dx * math.cos(_prev_theta)
+                             + dy * math.sin(_prev_theta))
+                dxy_mm = forward_m * 1000.0
                 dtheta_deg = math.degrees(dtheta)
                 pose_change = (dxy_mm, dtheta_deg, dt)
         else:

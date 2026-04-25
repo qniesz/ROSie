@@ -1,6 +1,7 @@
 .env
 *.env
 !.env.example
+ROSie.conf
 secrets/
 *.pem
 *.key

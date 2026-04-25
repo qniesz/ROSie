@@ -1,0 +1,571 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    One-time deployment script for ROSie on a Raspberry Pi Zero 2 W.
+
+.DESCRIPTION
+    Interactively prompts for Pi connection details and MQTT credentials,
+    then performs a full first-time setup over SSH:
+      - Verifies hardware and 64-bit OS
+      - Pushes your SSH public key (no password required after this)
+      - Installs OS packages
+      - Clones the ROSie GitHub repository
+      - Creates the Python venv and installs packages
+      - Writes ~/rosie-driver.env with MQTT credentials
+      - Installs the sudoers entry for passwordless service restart
+      - Installs and enables all systemd units
+      - Configures unattended OS security updates
+      - Verifies the service started successfully
+
+.NOTES
+    Requires: Windows 10+ with OpenSSH client (built-in) and
+              Posh-SSH module (auto-installed from PSGallery if missing).
+
+    The Pi user must have sudo access (default on Raspberry Pi OS).
+#>
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+# --- Posh-SSH module -----------------------------------------------------------
+if (-not (Get-Module -ListAvailable -Name Posh-SSH)) {
+    Write-Host "Installing Posh-SSH module from PSGallery..." -ForegroundColor Yellow
+    try {
+        Install-Module -Name Posh-SSH -Scope CurrentUser -Force -AllowClobber
+    } catch {
+        Write-Error "Failed to install Posh-SSH: $_`nInstall manually: Install-Module Posh-SSH -Scope CurrentUser"
+        exit 1
+    }
+}
+Import-Module Posh-SSH -DisableNameChecking
+
+# --- Step output helpers -------------------------------------------------------
+$script:StepNum = 0
+
+function Write-Step {
+    param([string]$Title)
+    $script:StepNum++
+    Write-Host ""
+    Write-Host ("  [{0:D2}] {1}" -f $script:StepNum, $Title) -ForegroundColor Cyan
+}
+
+function Write-OK   { Write-Host "       OK" -ForegroundColor Green }
+function Write-Warn { param([string]$Msg) Write-Host "       WARN: $Msg" -ForegroundColor Yellow }
+function Write-Fail { param([string]$Msg) Write-Host "       FAIL: $Msg" -ForegroundColor Red; throw "Deployment step failed: $Msg" }
+
+# --- SSH command helper --------------------------------------------------------
+function Invoke-Pi {
+    param(
+        [Parameter(Mandatory)][string]$Command,
+        [int]$TimeoutSec = 300,
+        [switch]$AllowFail
+    )
+    $result = Invoke-SSHCommand -SessionId $script:Session.SessionId `
+                                -Command $Command -TimeOut $TimeoutSec
+    if (-not $AllowFail -and $result.ExitStatus -ne 0) {
+        $errPart = if ($result.Error) { "`n  err : $($result.Error -join ' | ')" } else { "" }
+        Write-Fail "Command failed (exit $($result.ExitStatus))`n  cmd : $Command`n  out : $($result.Output -join ' | ')$errPart"
+    }
+    return $result
+}
+
+# --- Sudo helper: feeds password via stdin when needed ------------------------
+function Sudo-Pi {
+    param(
+        [Parameter(Mandatory)][string]$Command,
+        [int]$TimeoutSec = 300,
+        [switch]$AllowFail
+    )
+    if ($script:SudoNeedsPassword) {
+        # Escape single quotes in password for shell single-quote wrapping
+        $escPass = $PiPass -replace "'", "'\''"
+        $wrapped = "echo '$escPass' | sudo -S -p '' $Command"
+    } else {
+        $wrapped = "sudo $Command"
+    }
+    if ($AllowFail) {
+        return Invoke-Pi $wrapped -TimeoutSec $TimeoutSec -AllowFail
+    } else {
+        return Invoke-Pi $wrapped -TimeoutSec $TimeoutSec
+    }
+}
+
+# --- Config file loader -------------------------------------------------------
+# Looks for ROSie.conf in the same directory as this script.
+# Format is one "Key:Value" per line. Recognised keys:
+#   Pi_IP_address, Pi_username, Pi_password,
+#   MQTT_broker, MQTT_port, MQTT_username, MQTT_password,
+#   GitHub_PAT  (use "public" to skip)
+function Find-RosieConfig {
+    $local = Join-Path $PSScriptRoot "ROSie.conf"
+    if (Test-Path $local) { return $local }
+    return $null
+}
+
+function Read-RosieConfig {
+    param([string]$Path)
+    $cfg = @{}
+    foreach ($line in (Get-Content -LiteralPath $Path)) {
+        $trim = $line.Trim()
+        if ($trim -eq "" -or $trim.StartsWith("#")) { continue }
+        $idx = $trim.IndexOf(":")
+        if ($idx -lt 1) { continue }
+        $key = $trim.Substring(0, $idx).Trim()
+        $val = $trim.Substring($idx + 1).Trim()
+        $cfg[$key] = $val
+    }
+    return $cfg
+}
+
+# Prompt helper: returns config value if present, otherwise prompts.
+function Get-Setting {
+    param(
+        [hashtable]$Cfg,
+        [string]$Key,
+        [string]$Prompt,
+        [string]$Default = "",
+        [switch]$Secure
+    )
+    if ($Cfg.ContainsKey($Key) -and $Cfg[$Key] -ne "") {
+        $val = $Cfg[$Key]
+        Write-Host ("  {0,-30} {1}" -f $Prompt, $(if ($Secure) { "********" } else { $val })) -ForegroundColor DarkGray
+        if ($Secure) {
+            return (ConvertTo-SecureString -String $val -AsPlainText -Force)
+        }
+        return $val
+    }
+    if ($Secure) {
+        return Read-Host "  $Prompt" -AsSecureString
+    }
+    $entered = Read-Host "  $Prompt"
+    if ([string]::IsNullOrWhiteSpace($entered) -and $Default -ne "") { return $Default }
+    return $entered
+}
+
+# --- Interactive prompts -------------------------------------------------------
+Write-Host ""
+Write-Host "ROSie Pi Deployment" -ForegroundColor White
+Write-Host "===================" -ForegroundColor White
+Write-Host ""
+
+$cfgPath = Find-RosieConfig
+$cfg     = @{}
+if ($cfgPath) {
+    Write-Host "  Loaded settings from $cfgPath" -ForegroundColor Green
+    Write-Host ""
+    $cfg = Read-RosieConfig -Path $cfgPath
+} else {
+    Write-Host "  (No ROSie.conf found - prompting for each setting)" -ForegroundColor DarkGray
+    Write-Host ""
+}
+
+$PiHost      = Get-Setting -Cfg $cfg -Key "Pi_IP_address"   -Prompt "Pi IP address      (e.g. 192.168.x.x)"
+$PiUser      = Get-Setting -Cfg $cfg -Key "Pi_username"     -Prompt "Pi username        (e.g. rosie)"
+$PiPassSec   = Get-Setting -Cfg $cfg -Key "Pi_password"     -Prompt "Pi password" -Secure
+$MqttHost    = Get-Setting -Cfg $cfg -Key "MQTT_broker"     -Prompt "MQTT broker / HA IP (e.g. 192.168.x.x)"
+$MqttPort    = Get-Setting -Cfg $cfg -Key "MQTT_port"       -Prompt "MQTT port          (press Enter for 1883)" -Default "1883"
+$MqttUser    = Get-Setting -Cfg $cfg -Key "MQTT_username"   -Prompt "MQTT username"
+$MqttPassSec = Get-Setting -Cfg $cfg -Key "MQTT_password"   -Prompt "MQTT password" -Secure
+$GitTokenSec = Get-Setting -Cfg $cfg -Key "GitHub_PAT"      -Prompt "GitHub PAT          (press Enter - repo is public)" -Secure
+
+if ([string]::IsNullOrWhiteSpace($MqttPort)) { $MqttPort = "1883" }
+
+# Plain-text versions needed inside SSH command strings
+$MqttPass = [System.Net.NetworkCredential]::new("", $MqttPassSec).Password
+$PiPass   = [System.Net.NetworkCredential]::new("", $PiPassSec).Password
+$GitToken = [System.Net.NetworkCredential]::new("", $GitTokenSec).Password
+
+# "public" sentinel from the config file means "no PAT, repo is public"
+if ($GitToken -eq "public") { $GitToken = "" }
+
+$script:SudoNeedsPassword = $false  # set after probe
+
+Write-Host ""
+
+# --- Pre-flight: clear stale host key + handle KEX algorithm mismatch ---------
+# When a Pi is reflashed, its SSH host key changes; any previous entry in
+# ~/.ssh/known_hosts will block all SSH attempts. We silently clear it.
+# Also, modern Pi OS (Trixie+) defaults to KEX algorithms that the SSH.NET
+# library bundled with Posh-SSH does not support. If Posh-SSH cannot connect,
+# we use plink.exe (PuTTY) - which supports modern KEX and accepts the
+# password non-interactively via -pw - to push a one-time legacy-KEX config.
+Write-Step "SSH pre-flight (clearing stale host key, checking KEX support)"
+$knownHosts = Join-Path $env:USERPROFILE ".ssh\known_hosts"
+if (Test-Path $knownHosts) {
+    cmd /c "ssh-keygen -R $PiHost 2>nul 1>nul"
+}
+
+# Probe Posh-SSH connectivity. If KEX negotiation fails, use plink to apply
+# a one-time SSH compatibility fix on the Pi.
+$Cred  = New-Object System.Management.Automation.PSCredential($PiUser, $PiPassSec)
+$probe = $null
+try {
+    $probe = New-SSHSession -ComputerName $PiHost -Credential $Cred -AcceptKey -ErrorAction Stop
+} catch {
+    if ($_.Exception.Message -match "Key exchange|kex|negotiation failed|established connection was aborted|connection was forcibly closed|no common encryption|host key|algorithm") {
+        Write-Warn "Posh-SSH cannot negotiate a key exchange with this Pi."
+
+        # Locate plink.exe
+        $plink = Get-Command plink.exe -ErrorAction SilentlyContinue
+        if (-not $plink) {
+            $candidates = @(
+                "${env:ProgramFiles}\PuTTY\plink.exe",
+                "${env:ProgramFiles(x86)}\PuTTY\plink.exe"
+            )
+            foreach ($c in $candidates) {
+                if (Test-Path $c) { $plink = Get-Item $c; break }
+            }
+        }
+        if (-not $plink) {
+            Write-Host "       plink.exe (PuTTY) is needed to apply the SSH compatibility fix" -ForegroundColor Gray
+            Write-Host "       without prompting for the password." -ForegroundColor Gray
+            $install = Read-Host "       Install PuTTY automatically via winget? (Y/n)"
+            if ($install -eq "" -or $install -match "^[Yy]") {
+                Write-Host "       Installing PuTTY (this may take a minute)..." -ForegroundColor Gray
+                & winget install --id PuTTY.PuTTY --silent --accept-source-agreements --accept-package-agreements
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Fail "winget install PuTTY.PuTTY failed (exit $LASTEXITCODE). Install PuTTY manually and re-run."
+                }
+                # Re-probe for plink in standard install location
+                $candidates = @(
+                    "${env:ProgramFiles}\PuTTY\plink.exe",
+                    "${env:ProgramFiles(x86)}\PuTTY\plink.exe"
+                )
+                foreach ($c in $candidates) {
+                    if (Test-Path $c) { $plink = Get-Item $c; break }
+                }
+                if (-not $plink) {
+                    Write-Fail "PuTTY installed but plink.exe was not found in Program Files. Add it to PATH and re-run."
+                }
+            } else {
+                Write-Fail "Cannot apply SSH KEX fix without plink. Install PuTTY (winget install PuTTY.PuTTY) and re-run."
+            }
+        }
+
+        Write-Host "       Applying one-time SSH compatibility fix via plink..." -ForegroundColor Gray
+        # Why this is split into two plink calls:
+        #   A. Cache the host key (auto-answer "y" to plink's prompt).
+        #   B. Run sudo -S bash with a single stdin stream where line 1 is the
+        #      password and the rest is the bash script.
+        # Doing it in one call would let `echo y` collide with the password,
+        # and a heredoc on `bash -s` would override the `sudo -S` stdin.
+        $bashBody = @'
+set -e
+CFG=/etc/ssh/sshd_config
+# SSH.NET (used by Posh-SSH) only supports ssh-rsa / ssh-dss host key types,
+# but modern Pi OS only generates an ed25519 host key by default.
+if [ ! -f /etc/ssh/ssh_host_rsa_key ]; then
+  ssh-keygen -q -t rsa -b 4096 -N "" -f /etc/ssh/ssh_host_rsa_key
+fi
+# Remove any prior ROSie block so re-runs are idempotent
+sed -i '/# ROSie-legacy-kex-begin/,/# ROSie-legacy-kex-end/d' "$CFG"
+cat >> "$CFG" <<'INNER_EOF'
+# ROSie-legacy-kex-begin
+HostKey /etc/ssh/ssh_host_rsa_key
+KexAlgorithms +diffie-hellman-group-exchange-sha256,diffie-hellman-group14-sha256,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1,diffie-hellman-group1-sha1
+HostKeyAlgorithms +ssh-rsa
+PubkeyAcceptedAlgorithms +ssh-rsa
+# ROSie-legacy-kex-end
+INNER_EOF
+sshd -t
+# Trixie+ uses socket activation (ssh.socket). Restart the socket *and* the
+# service so the listener is rebound with the new config; otherwise new
+# connections can be aborted mid-handshake while the old listener tears down.
+systemctl daemon-reload || true
+if systemctl list-unit-files ssh.socket >/dev/null 2>&1; then
+  systemctl restart ssh.socket || true
+fi
+systemctl restart ssh 2>/dev/null || systemctl restart sshd || true
+# Wait for sshd to actually be listening again before we hand control back.
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if (echo > /dev/tcp/127.0.0.1/22) >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+echo OK
+'@
+        # stdin to the remote shell: line 1 = sudo password, rest = script body
+        $stdinPayload = $PiPass + "`n" + ($bashBody -replace "`r`n","`n") + "`n"
+        $plinkExe  = $plink.Source
+        $stdinFile = [System.IO.Path]::GetTempFileName()
+        $cmdFile   = [System.IO.Path]::GetTempFileName()
+        try {
+            # Step A: cache the host key (auto-answer "y" to plink's prompt).
+            # If already cached, "y" is harmlessly read by `cat` and discarded.
+            [System.IO.File]::WriteAllText($cmdFile, "cat >/dev/null`n",
+                [System.Text.UTF8Encoding]::new($false))
+            cmd /c "echo y | `"$plinkExe`" -ssh -pw `"$PiPass`" -m `"$cmdFile`" `"$PiUser@$PiHost`" >NUL 2>&1"
+
+            # Step B: run sudo -S bash with password+script piped via stdin.
+            # -batch ensures any further prompt fails fast (host key now cached).
+            # `sudo -k` invalidates any cached sudo credential so -S is *forced*
+            # to consume our password line from stdin. Without -k, a Pi with
+            # cached creds (or NOPASSWD) skips reading stdin and the password
+            # leaks into bash as a command -> "REDACTED_PASSWORD: command not found".
+            [System.IO.File]::WriteAllBytes($stdinFile,
+                [System.Text.UTF8Encoding]::new($false).GetBytes($stdinPayload))
+            $plinkOut = cmd /c "type `"$stdinFile`" | `"$plinkExe`" -ssh -batch -pw `"$PiPass`" `"$PiUser@$PiHost`" `"sudo -k -S -p '' bash`" 2>&1"
+            $plinkExit = $LASTEXITCODE
+            $plinkOutStr = ($plinkOut | Out-String).Trim()
+            # The remote script ends with `echo OK` only on full success.
+            # Verify both the exit code AND that "OK" was the final line — sudo
+            # itself can succeed (exit 0) while the inner bash script aborted.
+            if ($plinkExit -ne 0 -or $plinkOutStr -notmatch '(?ms)OK\s*$') {
+                Write-Host "       plink output:" -ForegroundColor Gray
+                foreach ($l in ($plinkOutStr -split "`n")) {
+                    Write-Host "         $l" -ForegroundColor DarkGray
+                }
+                Write-Fail "plink could not apply the SSH KEX fix (exit $plinkExit). See output above."
+            }
+        } finally {
+            Remove-Item -LiteralPath $stdinFile -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $cmdFile   -ErrorAction SilentlyContinue
+        }
+        Write-Host "       SSH compatibility fix applied. Waiting for sshd to come back..." -ForegroundColor Gray
+        Start-Sleep -Seconds 5
+    } else {
+        Write-Fail "Cannot reach ${PiHost}: $($_.Exception.Message)"
+    }
+}
+if ($probe) { Remove-SSHSession -SessionId $probe.SessionId | Out-Null }
+Write-OK
+
+# --- Connect ------------------------------------------------------------------
+Write-Step "Connecting to $PiHost"
+# Retry the connect: right after an sshd restart (especially with socket
+# activation on Trixie+), the first one or two TCP connections can be aborted
+# mid-handshake. A short retry loop avoids failing the whole deploy on that.
+$script:Session = $null
+$lastErr = $null
+for ($attempt = 1; $attempt -le 6; $attempt++) {
+    try {
+        $script:Session = New-SSHSession -ComputerName $PiHost -Credential $Cred -AcceptKey -ErrorAction Stop
+        break
+    } catch {
+        $lastErr = $_
+        if ($attempt -lt 6) {
+            Write-Host ("       attempt {0} failed ({1}); retrying in 5 s..." -f $attempt, $_.Exception.Message) -ForegroundColor DarkGray
+            Start-Sleep -Seconds 5
+        }
+    }
+}
+if (-not $script:Session) {
+    Write-Fail "Cannot connect to ${PiHost} after 6 attempts: $($lastErr.Exception.Message)"
+}
+Write-OK
+
+try {
+
+    # --- Hardware verification -------------------------------------------------
+    Write-Step "Verifying hardware"
+    $modelRaw = (Invoke-Pi "cat /proc/device-tree/model 2>/dev/null || grep Model /proc/cpuinfo 2>/dev/null | head -1 || echo unknown" -AllowFail).Output
+    if ($modelRaw -notmatch "Pi Zero 2") {
+        Write-Warn "Expected Pi Zero 2 W, detected: $($modelRaw.Trim())"
+        $cont = Read-Host "  Continue anyway? (y/N)"
+        if ($cont -ne "y") { throw "Aborted by user" }
+    } else {
+        Write-OK
+    }
+    $arch = (Invoke-Pi "uname -m").Output.Trim()
+    if ($arch -ne "aarch64") {
+        Write-Warn "Expected aarch64 (64-bit), got: $arch - performance may be reduced"
+    }
+
+    # --- Verify sudo works ----------------------------------------------------
+    Write-Step "Checking sudo access"
+    $sudoCheck = Invoke-Pi "sudo -n true" -AllowFail
+    if ($sudoCheck.ExitStatus -eq 0) {
+        Write-OK
+        Write-Host "       (passwordless sudo)" -ForegroundColor Gray
+    } else {
+        $script:SudoNeedsPassword = $true
+        # Verify the supplied password actually works for sudo
+        $sudoTest = Sudo-Pi "true" -AllowFail
+        if ($sudoTest.ExitStatus -ne 0) {
+            Write-Fail "Pi password does not grant sudo access. err: $($sudoTest.Error -join ' | ')"
+        }
+        Write-OK
+        Write-Host "       (sudo password will be supplied via stdin)" -ForegroundColor Gray
+    }
+
+    # --- SSH key setup --------------------------------------------------------
+    Write-Step "Setting up SSH key authentication"
+    $keyPath = Join-Path $env:USERPROFILE ".ssh\id_rsa"
+    $pubPath = "$keyPath.pub"
+    if (-not (Test-Path $pubPath)) {
+        Write-Host "       Generating RSA 4096 key pair at $keyPath..." -ForegroundColor Gray
+        $null = & ssh-keygen -t rsa -b 4096 -N '""' -f $keyPath -q 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "ssh-keygen failed - continuing without key setup"
+        }
+    }
+    if (Test-Path $pubPath) {
+        $pubKey = (Get-Content $pubPath -Raw).Trim()
+        # Append key, de-duplicate, fix permissions
+        $keyCmd = "mkdir -p ~/.ssh && echo '$pubKey' >> ~/.ssh/authorized_keys && sort -u ~/.ssh/authorized_keys -o ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"
+        Invoke-Pi $keyCmd | Out-Null
+        Write-OK
+    } else {
+        Write-Warn "No public key found - skipping key setup (password auth only)"
+    }
+
+    # --- OS packages ----------------------------------------------------------
+    Write-Step "Updating package lists and installing OS packages"
+    Write-Host "       (apt-get update - up to a couple of minutes)" -ForegroundColor Gray
+    $updateResult = Sudo-Pi "apt-get update 2>&1" -TimeoutSec 300 -AllowFail
+    if ($updateResult.ExitStatus -ne 0) {
+        Write-Warn "apt-get update returned exit $($updateResult.ExitStatus) - continuing"
+        Write-Host "       $($updateResult.Output -join ' | ')" -ForegroundColor Gray
+    } else {
+        Write-Host "       package lists refreshed" -ForegroundColor Gray
+    }
+
+    # Install in groups so the user sees progress between SSH calls
+    $pkgGroups = [ordered]@{
+        "build tools (gcc, python3-dev, python3-venv, git)"           = "gcc python3-dev python3-venv git"
+        "system services (unattended-upgrades, mosquitto-clients)"    = "unattended-upgrades mosquitto-clients fonts-dejavu-core"
+        "python libs (numpy, scipy, pillow, serial, RPi.GPIO, psutil)" = "python3-numpy python3-scipy python3-pil python3-serial python3-rpi.gpio python3-psutil"
+    }
+    foreach ($label in $pkgGroups.Keys) {
+        Write-Host ("       installing {0}..." -f $label) -ForegroundColor Gray
+        $grp = $pkgGroups[$label]
+        $r = Sudo-Pi "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $grp" -TimeoutSec 600
+        Write-Host "           done" -ForegroundColor DarkGray
+    }
+    Write-OK
+
+    # --- Clone repository -----------------------------------------------------
+    Write-Step "Cloning ROSie repository"
+    if ([string]::IsNullOrWhiteSpace($GitToken)) {
+        $repoUrl = "https://github.com/qniesz/ROSie.git"
+    } else {
+        # PAT-authenticated URL (token used as username, blank password works)
+        $repoUrl = "https://${GitToken}@github.com/qniesz/ROSie.git"
+    }
+    # GIT_TERMINAL_PROMPT=0 makes git fail fast instead of hanging on a tty prompt
+    $cloneOut = (Invoke-Pi "if [ -d ~/rosie/.git ]; then echo ALREADY_CLONED; else GIT_TERMINAL_PROMPT=0 git clone $repoUrl ~/rosie; fi" -TimeoutSec 300 -AllowFail)
+    if ($cloneOut.ExitStatus -ne 0) {
+        if ($cloneOut.Error -match "could not read Username|Authentication failed") {
+            Write-Fail "Repo requires authentication. Re-run and provide a GitHub Personal Access Token at the prompt.`n        Create one at: https://github.com/settings/tokens (scope: repo)"
+        } else {
+            Write-Fail "git clone failed: $($cloneOut.Error -join ' | ')"
+        }
+    }
+    if ($cloneOut.Output -match "ALREADY_CLONED") {
+        Write-Warn "~/rosie already exists - skipping clone (run 'git pull' manually if needed)"
+    } else {
+        Write-OK
+    }
+
+    # --- Python venv ----------------------------------------------------------
+    Write-Step "Creating Python venv and installing packages"
+    Write-Host "       (breezyslam compiles C - allow ~3 min on Pi Zero)" -ForegroundColor Gray
+    # --system-site-packages reuses distro numpy/scipy/Pillow/pyserial/RPi.GPIO
+    # to avoid long compile times; pip adds paho-mqtt (pinned <2.0).
+    Invoke-Pi "python3 -m venv --system-site-packages ~/rosie-venv" | Out-Null
+    Write-Host "       installing paho-mqtt..." -ForegroundColor Gray
+    Invoke-Pi '~/rosie-venv/bin/pip install -q "paho-mqtt>=1.6,<2.0"' -TimeoutSec 300 | Out-Null
+    # BreezySLAM is not on PyPI for arm64 - build from source on GitHub.
+    # The Python C extension is built by setup.py during pip install.
+    Write-Host "       building BreezySLAM from source (this is the slow part)..." -ForegroundColor Gray
+    Invoke-Pi "~/rosie-venv/bin/pip install -q 'git+https://github.com/simondlevy/BreezySLAM.git#subdirectory=python'" -TimeoutSec 900 | Out-Null
+    Write-OK
+
+    # --- Maps directory -------------------------------------------------------
+    Write-Step "Creating maps directory"
+    Invoke-Pi "mkdir -p ~/maps" | Out-Null
+    Write-OK
+
+    # --- Environment file -----------------------------------------------------
+    Write-Step "Writing ~/rosie-driver.env"
+    # Build the env file content and write it safely line by line
+    $envLines = @(
+        "MQTT_HOST=$MqttHost",
+        "MQTT_PORT=$MqttPort",
+        "MQTT_USER=$MqttUser",
+        "MQTT_PASS=$MqttPass",
+        "MQTT_PREFIX=rosie",
+        "ROSIE_SERIAL_PORT=/dev/ttyACM0"
+    )
+    Invoke-Pi "rm -f ~/rosie-driver.env.tmp" | Out-Null
+    foreach ($line in $envLines) {
+        Invoke-Pi "echo '$line' >> ~/rosie-driver.env.tmp" | Out-Null
+    }
+    Invoke-Pi "mv ~/rosie-driver.env.tmp ~/rosie-driver.env && chmod 600 ~/rosie-driver.env" | Out-Null
+    Write-OK
+
+    # --- Sudoers entry --------------------------------------------------------
+    Write-Step "Installing sudoers entry (passwordless service restart)"
+    Sudo-Pi "cp /home/$PiUser/rosie/pi/sudoers.d/rosie /etc/sudoers.d/rosie" | Out-Null
+    Sudo-Pi "chmod 440 /etc/sudoers.d/rosie" | Out-Null
+    $visudoCheck = Sudo-Pi "visudo -c" -AllowFail
+    if ($visudoCheck.ExitStatus -ne 0) {
+        Write-Warn "visudo -c reported an issue: $($visudoCheck.Output)"
+    } else {
+        Write-OK
+    }
+
+    # --- Make scripts executable ----------------------------------------------
+    Write-Step "Making update scripts executable"
+    Invoke-Pi "chmod +x ~/rosie/pi/update.sh ~/rosie/pi/check_updates.sh" | Out-Null
+    Write-OK
+
+    # --- Systemd units --------------------------------------------------------
+    Write-Step "Installing systemd units"
+    $units = @(
+        "rosie.service",
+        "rosie-update.service",
+        "rosie-update.timer",
+        "rosie-check-updates.service",
+        "rosie-check-updates.timer"
+    )
+    foreach ($unit in $units) {
+        Sudo-Pi "cp /home/$PiUser/rosie/pi/systemd/$unit /etc/systemd/system/$unit" | Out-Null
+    }
+    Sudo-Pi "systemctl daemon-reload" | Out-Null
+    Sudo-Pi "systemctl enable rosie.service rosie-update.timer rosie-check-updates.timer" | Out-Null
+    Sudo-Pi "systemctl start rosie.service" -AllowFail | Out-Null
+    Write-OK
+
+    # --- Unattended OS security updates ---------------------------------------
+    Write-Step "Configuring automatic OS security patches"
+    # Stage files in user home (no sudo), then move into place with sudo
+    Invoke-Pi "cat > /tmp/20auto-upgrades <<'EOF'`nAPT::Periodic::Update-Package-Lists `"1`";`nAPT::Periodic::Unattended-Upgrade `"1`";`nAPT::Periodic::AutocleanInterval `"7`";`nEOF" | Out-Null
+    Sudo-Pi "mv /tmp/20auto-upgrades /etc/apt/apt.conf.d/20auto-upgrades" | Out-Null
+    Invoke-Pi "echo 'Unattended-Upgrade::Automatic-Reboot `"false`";' > /tmp/50extra" | Out-Null
+    Sudo-Pi "bash -c 'cat /tmp/50extra >> /etc/apt/apt.conf.d/50unattended-upgrades && rm /tmp/50extra'" | Out-Null
+    Write-OK
+
+    # --- Verify service -------------------------------------------------------
+    Write-Step "Waiting for service to stabilise (5 s)"
+    Start-Sleep -Seconds 5
+    $svcStatus = (Invoke-Pi "systemctl is-active rosie" -AllowFail).Output.Trim()
+    if ($svcStatus -eq "active") {
+        Write-OK
+        Write-Host ""
+        Write-Host "  ROSie is running!" -ForegroundColor Green
+        Write-Host "  Check Home Assistant entities in ~30 seconds." -ForegroundColor Green
+    } else {
+        Write-Warn "Service status: $svcStatus"
+        Write-Host "  Run this to see why:" -ForegroundColor Yellow
+        Write-Host "    ssh ${PiUser}@${PiHost} 'journalctl -u rosie -n 50 --no-pager'" -ForegroundColor Gray
+        Write-Host "  Common cause: Neato not plugged in yet (driver retries automatically)" -ForegroundColor Gray
+    }
+
+    # --- Summary --------------------------------------------------------------
+    Write-Host ""
+    Write-Host "  Deployment complete. Useful commands:" -ForegroundColor White
+    Write-Host ""
+    Write-Host "    ssh ${PiUser}@${PiHost}" -ForegroundColor Gray
+    Write-Host "    journalctl -u rosie -f                      # live logs" -ForegroundColor Gray
+    Write-Host "    systemctl list-timers                        # scheduled timers" -ForegroundColor Gray
+    Write-Host "    ~/rosie/pi/update.sh --force                 # manual update" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  Serial port is set to /dev/ttyACM0 in ~/rosie-driver.env." -ForegroundColor Gray
+    Write-Host "  Change ROSIE_SERIAL_PORT if your Neato appears on a different port." -ForegroundColor Gray
+    Write-Host ""
+
+} finally {
+    if ($script:Session) {
+        Remove-SSHSession -SessionId $script:Session.SessionId | Out-Null
+    }
+}
