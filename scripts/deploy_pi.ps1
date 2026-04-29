@@ -255,6 +255,9 @@ $GitTokenSec   = Get-Setting -Cfg $cfg -Key "GitHub_PAT"    -Prompt "GitHub PAT 
 
 if ([string]::IsNullOrWhiteSpace($MqttPort)) { $MqttPort = "1883" }
 
+$ManualUpdates = Get-Setting -Cfg $cfg -Key "manual_updates" -Prompt "Disable scheduled auto-updates (true/false)" -Default "false"
+if ([string]::IsNullOrWhiteSpace($ManualUpdates)) { $ManualUpdates = "false" }
+
 $MqttPass = [System.Net.NetworkCredential]::new("", $MqttPassSec).Password
 $GitToken = [System.Net.NetworkCredential]::new("", $GitTokenSec).Password
 if ($GitToken -eq "public") { $GitToken = "" }
@@ -432,7 +435,8 @@ Then re-run this script.
         "MQTT_USER=$MqttUser",
         "MQTT_PASS=$MqttPass",
         "MQTT_PREFIX=rosie",
-        "ROSIE_SERIAL_PORT=/dev/ttyACM0"
+        "ROSIE_SERIAL_PORT=/dev/ttyACM0",
+        "ROSIE_MANUAL_UPDATES=$ManualUpdates"
     ) -join "`n"
     # Write with LF line endings and no BOM
     [System.IO.File]::WriteAllText($tmpEnv, $envBody + "`n", [System.Text.UTF8Encoding]::new($false))

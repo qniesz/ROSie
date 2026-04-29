@@ -15,6 +15,11 @@ ENV_FILE="$HOME/rosie-driver.env"
 # shellcheck source=/dev/null
 source "$ENV_FILE" 2>/dev/null || true
 
+# Skip the check entirely in manual-updates mode
+if [[ "${ROSIE_MANUAL_UPDATES:-false}" == "true" ]]; then
+    exit 0
+fi
+
 # Fetch without pulling — silent on network failure (no update info is OK)
 git -C "$REPO_DIR" fetch origin main 2>/dev/null || exit 0
 

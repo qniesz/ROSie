@@ -65,6 +65,12 @@ PREV_SHA=$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null) \
 
 # ── Cleaning guard ─────────────────────────────────────────────────────────────
 if [[ "$FORCE" -eq 0 ]]; then
+    # Manual-updates mode: skip scheduled runs entirely (--force still works)
+    if [[ "${ROSIE_MANUAL_UPDATES:-false}" == "true" ]]; then
+        _log_result "$(date -Iseconds) SKIPPED: manual-updates mode enabled (ROSIE_MANUAL_UPDATES=true)"
+        exit 0
+    fi
+
     if command -v mosquitto_sub >/dev/null 2>&1 && [[ -n "${MQTT_HOST:-}" ]]; then
         _MSUB_ARGS="-h ${MQTT_HOST} -p ${MQTT_PORT:-1883}"
         [[ -n "${MQTT_USER:-}" ]] && _MSUB_ARGS="$_MSUB_ARGS -u ${MQTT_USER}"
