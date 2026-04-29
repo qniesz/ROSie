@@ -114,8 +114,8 @@ fi
 sudo systemctl restart rosie \
     || _rollback "systemctl restart failed" "$PREV_SHA"
 
-# ── Health check — wait up to 30 s ────────────────────────────────────────────
-for _i in $(seq 1 30); do
+# ── Health check — wait up to 60 s (Pi Zero 2 W can be slow to start) ─────────
+for _i in $(seq 1 60); do
     sleep 1
     if sudo systemctl is-active rosie >/dev/null 2>&1; then
         _log_result "$(date -Iseconds) OK: ${PREV_SHA:0:7} -> ${NEW_SHA:0:7}"
@@ -123,4 +123,4 @@ for _i in $(seq 1 30); do
     fi
 done
 
-_rollback "service failed to become active within 30 s" "$PREV_SHA"
+_rollback "service failed to become active within 60 s" "$PREV_SHA"
