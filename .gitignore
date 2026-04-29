@@ -22,6 +22,10 @@ build/
 maps/
 replay_out/
 backup/
-tools/
+# Ignore everything under tools/ except the slam_toolbox eval source —
+# Dockerfile + replay node + params need to ship so the Pi can rebuild the
+# image and the runtime params mount can find slam_params.yaml.
+tools/*
+!tools/slam_toolbox_eval/
 
 
