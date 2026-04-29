@@ -1,3 +1,6 @@
 # ROSie: allow software update service to restart the driver without a password.
 # Install to /etc/sudoers.d/rosie (chmod 440).
 rosie ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart rosie
+# Drop page cache before slam_toolbox runs to free RAM (reduces swap pressure
+# during map processing). Restricted to writing /proc/sys/vm/drop_caches only.
+rosie ALL=(ALL) NOPASSWD: /usr/bin/tee /proc/sys/vm/drop_caches

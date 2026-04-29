@@ -898,14 +898,24 @@ class MapPipeline:
 
         Tunables (env):
             ROSIE_SLAM_IMAGE   docker image (default rosie-slam-eval:latest)
-            ROSIE_SLAM_SPEED   replay speed multiplier (default "2")
+            ROSIE_SLAM_SPEED   replay speed multiplier (default "3")
             ROSIE_SLAM_SETTLE  post-replay settle seconds (default "20")
             ROSIE_SLAM_TIMEOUT subprocess timeout seconds (default "1500")
+            ROSIE_SLAM_PARAMS  optional path to slam_params.yaml; if set and
+                               readable, mounted into the container so param
+                               edits don't require a Docker rebuild.
         """
         image   = os.environ.get("ROSIE_SLAM_IMAGE",   "rosie-slam-eval:latest")
-        speed   = os.environ.get("ROSIE_SLAM_SPEED",   "2")
+        speed   = os.environ.get("ROSIE_SLAM_SPEED",   "3")
         settle  = os.environ.get("ROSIE_SLAM_SETTLE",  "20")
         timeout = int(os.environ.get("ROSIE_SLAM_TIMEOUT", "1500"))
+
+        # Default params override location: ~/rosie/tools/slam_toolbox_eval/slam_params.yaml
+        # If present, we mount it into the container so edits take effect on
+        # the next run without rebuilding the Docker image.
+        params_default = Path.home() / "rosie" / "tools" / "slam_toolbox_eval" / "slam_params.yaml"
+        params_env = os.environ.get("ROSIE_SLAM_PARAMS", "")
+        params_path = Path(params_env) if params_env else params_default
 
         out_dir = Path("/tmp/rosie_slam_out")
         try:
@@ -919,6 +929,22 @@ class MapPipeline:
             logger.exception("could not prepare %s", out_dir)
             return None
 
+        # ── Free RAM before the heavy container launches ──────────────────
+        # Drops the kernel page cache (typically 100–150 MB on the Pi) so
+        # slam_toolbox has more headroom and hits swap less aggressively.
+        # Sudoers rule: rosie NOPASSWD on /usr/bin/tee /proc/sys/vm/drop_caches.
+        # Failures here are non-fatal — just less RAM available.
+        try:
+            subprocess.run(["sync"], check=False, timeout=5)
+            subprocess.run(
+                ["sudo", "-n", "tee", "/proc/sys/vm/drop_caches"],
+                input="3\n", text=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False, timeout=5,
+            )
+        except Exception:
+            logger.debug("page-cache drop failed (non-fatal)", exc_info=True)
+
         cmd = [
             "docker", "run", "--rm",
             "--name", "rosie_slam_eval",
@@ -929,6 +955,11 @@ class MapPipeline:
             "--memory-swap", os.environ.get("ROSIE_SLAM_SWAP", "1500m"),
             "-v", f"{jsonl_path}:/data/scan.jsonl:ro",
             "-v", f"{out_dir}:/out",
+        ]
+        if params_path.is_file():
+            cmd += ["-v", f"{params_path}:/eval/slam_params.yaml:ro"]
+            logger.info("slam_toolbox: mounting params from %s", params_path)
+        cmd += [
             "-e", f"ROSIE_REPLAY_SPEED={speed}",
             "-e", f"ROSIE_REPLAY_SETTLE={settle}",
             image,
