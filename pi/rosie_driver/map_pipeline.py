@@ -935,32 +935,74 @@ class MapPipeline:
         ]
         logger.info("slam_toolbox: %s", " ".join(cmd))
         t0 = time.time()
+        stderr_lines: list[str] = []
         try:
-            res = subprocess.run(
-                cmd, capture_output=True, text=True,
-                timeout=timeout, check=False,
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
             )
-        except subprocess.TimeoutExpired:
-            logger.error("slam_toolbox container timed out after %ds", timeout)
-            # Best-effort kill of dangling container
-            try:
-                subprocess.run(
-                    ["docker", "rm", "-f", "rosie_slam_eval"],
-                    capture_output=True, timeout=15, check=False,
-                )
-            except Exception:
-                pass
-            return None
         except FileNotFoundError:
             logger.warning("docker CLI not found — skipping slam_toolbox upgrade")
             return None
+
+        import re as _re
+        _progress_re = _re.compile(r"replay:\s*(\d+)/(\d+)")
+        _last_publish = 0.0
+
+        # Stream stdout to pick up "replay: N/Total" progress lines.
+        # stderr is read after the process exits to keep it simple.
+        try:
+            assert proc.stdout is not None
+            for raw_line in proc.stdout:
+                line = raw_line.rstrip()
+                m = _progress_re.search(line)
+                if m:
+                    done, total = int(m.group(1)), int(m.group(2))
+                    pct = int(100 * done / total) if total else 0
+                    now = time.time()
+                    # Throttle MQTT publishes to once every 5 s
+                    if now - _last_publish >= 5.0:
+                        self._publish_status(
+                            SAVING,
+                            f"Refining map ({pct}% — {done}/{total} scans)…",
+                        )
+                        _last_publish = now
+            proc.stdout.close()
+
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                logger.error("slam_toolbox container timed out after %ds", timeout)
+                try:
+                    subprocess.run(
+                        ["docker", "rm", "-f", "rosie_slam_eval"],
+                        capture_output=True, timeout=15, check=False,
+                    )
+                except Exception:
+                    pass
+                return None
+
+            assert proc.stderr is not None
+            stderr_lines = proc.stderr.read().splitlines()
+            proc.stderr.close()
+
+        except Exception:
+            logger.exception("slam_toolbox streaming failed")
+            proc.kill()
+            proc.wait()
+            return None
+
         elapsed = time.time() - t0
 
-        if res.returncode != 0:
+        if proc.returncode != 0:
             logger.error(
                 "slam_toolbox container failed (rc=%s, %.1fs)\nstderr tail:\n%s",
-                res.returncode, elapsed,
-                "\n".join(res.stderr.strip().splitlines()[-15:]),
+                proc.returncode, elapsed,
+                "\n".join(stderr_lines[-15:]),
             )
             return None
 
@@ -1296,7 +1338,7 @@ class MapPipeline:
             "name": "Map Pipeline",
             "unique_id": "rosie_map_pipeline_status",
             "state_topic": f"{pfx}/map_pipeline/status",
-            "value_template": "{{ value_json.status }}",
+            "value_template": "{{ value_json.detail if value_json.detail else value_json.status }}",
             "json_attributes_topic": f"{pfx}/map_pipeline/status",
             "icon": "mdi:map-clock",
         })
