@@ -94,13 +94,15 @@ def start() -> None:
             laser,
             MAP_SIZE_PIXELS,
             MAP_SIZE_METERS,
-            map_quality=50,           # lower quality + more passes self-averages
-                                       # better than high quality with any drift;
-                                       # 70 was double-painting offset walls into
-                                       # "blob constellations".
-            hole_width_mm=120,        # thinner wall paint (was 200) — less blob
-                                       # smearing when consecutive passes land
-                                       # at slightly different estimated poses.
+            map_quality=80,           # walls are painted strongly per scan
+                                       # so they survive small pose hops
+                                       # without being carved away by the
+                                       # next ray's wall-erase pass.
+            hole_width_mm=60,         # very thin wall-erase corridor (was
+                                       # 120) — reduces the "walls fade as
+                                       # the vac moves" effect by limiting
+                                       # how aggressively each ray erases
+                                       # cells near its endpoint.
             random_seed=42,
             sigma_xy_mm=30,           # trust odometry more (was 50) now that
                                        # the pose_change feed uses signed

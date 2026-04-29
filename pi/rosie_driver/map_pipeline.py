@@ -44,6 +44,7 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont
 
+from . import scan_recorder
 from . import slam as _slam_mod
 
 logger = logging.getLogger("rosie.pipeline")
@@ -82,6 +83,7 @@ LIVE_PREVIEW_INTERVAL = 3    # raw SLAM-grid preview cadence (seconds)
                              # — cheap (~50 ms): no clean_map, no scipy,
                              # just raw mapbytes → PIL → base64 PNG.
 DIAG_INTERVAL        = 30    # diagnostics publish cadence (seconds)
+SCAN_LOG_INTERVAL    = 5     # scan-recorder status cadence (seconds)
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +141,15 @@ class MapPipeline:
         self._last_overlay_key = None
         self._last_map_refresh: float = 0.0
         self._last_live_preview: float = 0.0
+        self._preview_frame_count: int = 0
+        self._preview_last_warn: float = 0.0
+        # Live-preview wall persistence: accumulating boolean mask of every
+        # cell that has ever been classified as a wall during the current
+        # mapping run.  Hides BreezySLAM's per-frame wall "fade" so the user
+        # sees a stable picture as the vacuum moves.  Reset on each MAPPING
+        # entry; does NOT affect the saved map (clean_map.py reads the raw
+        # SLAM grid at dock-return).
+        self._preview_wall_persist = None  # type: Optional["np.ndarray"]
 
         # ── Diagnostics ───────────────────────────────────────────────────
         self._last_diag: float = 0.0
@@ -238,6 +249,12 @@ class MapPipeline:
         the map overlay.  This is dramatically more accurate than raw wheel
         odometry, which drifts heavily on carpet and after turns.
         """
+        # Scan recording is independent of SLAM activation: we want to
+        # capture data even when SLAM is off, so the user can record a run
+        # without triggering a full mapping pipeline.
+        if scan_recorder.is_recording():
+            scan_recorder.record(scan, odom)
+
         if not self._slam_active:
             return
         _slam_mod.update(scan, odom)
@@ -311,6 +328,7 @@ class MapPipeline:
                 self._maybe_publish_live_preview()
                 self._publish_diagnostics()
                 self._check_update_log()
+                self._maybe_publish_scan_log_status()
             except Exception:
                 logger.debug("bg_loop exception", exc_info=True)
             self._stop_event.wait(timeout=1.0)
@@ -367,8 +385,21 @@ class MapPipeline:
 
         try:
             self._publish_slam_preview()
+            self._preview_frame_count += 1
+            # First frame and every ~30 frames (~90 s) log so we can
+            # confirm the live HA camera is actually being driven.
+            if (self._preview_frame_count == 1
+                    or self._preview_frame_count % 30 == 0):
+                logger.info(
+                    "live preview: %d frames published",
+                    self._preview_frame_count,
+                )
         except Exception:
-            logger.debug("live preview failed", exc_info=True)
+            # Throttle to one warning per 30 s so a persistent failure
+            # doesn't spam the journal, but the user still sees it.
+            if now - self._preview_last_warn > 30:
+                self._preview_last_warn = now
+                logger.warning("live preview failed", exc_info=True)
 
     # =========================================================================
     # Diagnostics
@@ -393,25 +424,59 @@ class MapPipeline:
         except ImportError:
             pass   # psutil optional
 
+    # =========================================================================
+    # Scan-log status
+    # =========================================================================
+
+    def _publish_scan_log_status(self) -> None:
+        """Publish scan_recorder.get_status() to MQTT (retained)."""
+        status = scan_recorder.get_status()
+        self._last_scan_log_state = status
+        self._last_scan_log_pub = time.monotonic()
+        self._mqtt.publish("scan_log/status", status, retain=True)
+
+    def _maybe_publish_scan_log_status(self) -> None:
+        """Publish status periodically while recording, plus a single
+        update on transitions even when idle (so HA reflects it promptly)."""
+        now = time.monotonic()
+        recording = scan_recorder.is_recording()
+        force = (
+            self._last_scan_log_state is None
+            or (self._last_scan_log_state.get("state") == "recording") != recording
+        )
+        if not force and not recording:
+            return
+        if not force and now - self._last_scan_log_pub < SCAN_LOG_INTERVAL:
+            return
+        self._publish_scan_log_status()
+
     def _publish_version(self) -> None:
-        """Read git version from the local repo and publish to MQTT."""
+        """Publish driver version (from _version.py) plus git metadata."""
+        try:
+            from ._version import VERSION
+        except Exception:
+            VERSION = "unknown"
+
+        payload = {"version": VERSION}
+
+        # Best-effort git metadata as attributes (for debugging only).
         try:
             repo = Path.home() / "rosie"
-            short_sha = subprocess.check_output(
+            payload["short_sha"] = subprocess.check_output(
                 ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"],
                 stderr=subprocess.DEVNULL, text=True,
             ).strip()
-            commit_date = subprocess.check_output(
+            payload["commit_date"] = subprocess.check_output(
                 ["git", "-C", str(repo), "log", "-1", "--format=%ci"],
                 stderr=subprocess.DEVNULL, text=True,
-            ).strip()[:10]  # YYYY-MM-DD only
-            self._mqtt.publish(
-                "version",
-                {"short_sha": short_sha, "commit_date": commit_date},
-                retain=True,
-            )
+            ).strip()[:10]
         except Exception:
-            logger.debug("Could not read git version", exc_info=True)
+            logger.debug("Could not read git metadata", exc_info=True)
+
+        try:
+            self._mqtt.publish("version", payload, retain=True)
+        except Exception:
+            logger.debug("Could not publish version", exc_info=True)
 
     def _publish_last_update(self) -> None:
         """Read ~/last-update.txt and publish its content to MQTT."""
@@ -453,6 +518,16 @@ class MapPipeline:
                 if _slam_mod.is_running():
                     _slam_mod.stop()
                 self._slam_active = False
+            finally:
+                # Always stop scan recording when the pipeline exits, whether
+                # the run succeeded, failed, or was aborted. Safe to call when
+                # the recorder isn't running.
+                if scan_recorder.is_recording():
+                    try:
+                        scan_recorder.stop()
+                        self._publish_scan_log_status()
+                    except Exception:  # noqa: BLE001
+                        logger.debug("scan_recorder.stop failed", exc_info=True)
 
     def _pipeline_impl(self) -> None:
         # ── 1. Clear old map ──────────────────────────────────────────────
@@ -463,6 +538,19 @@ class MapPipeline:
         self._publish_status(MAPPING)
         _slam_mod.start()
         self._slam_active = True
+        # Reset live-preview heartbeat so we re-log first frame for this run.
+        self._preview_frame_count = 0
+        self._preview_last_warn = 0.0
+        # Start scan recording for offline replay against alternative SLAM
+        # engines (karto_sdk smoke test, etc.). Auto-stops in the finally block.
+        try:
+            scan_recorder.start()
+            self._publish_scan_log_status()
+        except Exception:  # noqa: BLE001
+            logger.warning("scan_recorder.start failed", exc_info=True)
+        # Reset preview wall-persistence so old walls don't bleed into a new
+        # run.  This buffer accumulates wall pixels for the live preview only.
+        self._preview_wall_persist = None
         # SLAM resets the world frame so robot (= on dock) is at (0, 0).
         # Persist this immediately so overlay rendering during this run
         # has a valid dock pose.  A clean re-dock at the end keeps it.
@@ -522,6 +610,34 @@ class MapPipeline:
         yaml_path, _pgm_path = _slam_mod.save_map(self._map_dir)
         self._slam_active = False
         _slam_mod.stop()
+
+        # ── 5b. Optional: upgrade map quality with slam_toolbox ──────────
+        # BreezySLAM gives us a fast live map; slam_toolbox + Ceres gives a
+        # sharper one with loop closure.  Replays the JSONL we just captured.
+        # Falls back silently to the BreezySLAM map on any failure.
+        if os.environ.get("ROSIE_USE_SLAM_TOOLBOX", "1") not in ("0", "", "no"):
+            # Stop recorder first so the JSONL is flushed/closed.
+            jsonl_path = ""
+            try:
+                if scan_recorder.is_recording():
+                    scan_recorder.stop()
+                    self._publish_scan_log_status()
+                jsonl_path = scan_recorder.get_status().get("path", "") or ""
+            except Exception:  # noqa: BLE001
+                logger.debug("scan_recorder stop/status failed", exc_info=True)
+
+            if jsonl_path and Path(jsonl_path).exists():
+                self._publish_status(SAVING, "Refining map (slam_toolbox)…")
+                upgraded_yaml = self._run_slam_toolbox_upgrade(
+                    Path(jsonl_path), self._map_dir
+                )
+                if upgraded_yaml is not None:
+                    yaml_path = upgraded_yaml
+                    logger.info("Map upgraded by slam_toolbox: %s", yaml_path)
+                else:
+                    logger.warning(
+                        "slam_toolbox upgrade failed — keeping BreezySLAM map"
+                    )
 
         # ── 6. Process map (clean_map.py) ─────────────────────────────────
         self._publish_status(PROCESSING)
@@ -600,18 +716,68 @@ class MapPipeline:
         if grid is None:
             return
 
+        # ── Light post-processing for readability ─────────────────────────
+        # The raw BreezySLAM grid is mostly 1-pixel scan hits.  A couple of
+        # cheap operations close the visual gap with the final clean_map
+        # render without the cost (~25 s) of running clean_map.py.
+        try:
+            from scipy.ndimage import binary_dilation, binary_propagation
+            have_scipy = True
+        except ImportError:
+            have_scipy = False
+
+        wall_mask = grid < 64
+        free_mask = grid > 190
+
+        if have_scipy:
+            # 1) Fatten walls by 2 px so they read as continuous lines
+            #    instead of dotted scatter.
+            wall_mask = binary_dilation(wall_mask, iterations=2)
+            # 2) Floor flood-fill: any unknown cell reachable from a
+            #    free cell *without crossing a wall* becomes floor.  This
+            #    fills the interior of the home so it visually matches
+            #    clean_map.py's solid white floor.
+            free_propagated = binary_propagation(
+                free_mask, mask=~wall_mask
+            )
+            free_mask = free_propagated
+            # Walls win over floor where they overlap (dilation can spill).
+            free_mask &= ~wall_mask
+
+        # ── Wall persistence (live-preview only) ────────────────────────
+        # Decaying confidence buffer: each cell holds a uint8 "wall age".
+        # A wall observation refills it to 255; each preview frame it
+        # decays; a strong free observation clears it instantly.  Cells
+        # SLAM keeps re-confirming stay solid; transient/drifted wall
+        # paints fade out within a few frames so they don't smear.  This
+        # does NOT affect the saved map.
+        if (self._preview_wall_persist is None
+                or self._preview_wall_persist.shape != wall_mask.shape):
+            self._preview_wall_persist = np.zeros(
+                wall_mask.shape, dtype=np.uint8)
+
+        WALL_DECAY     = 40    # subtract per frame (~6 frames ≈ 18 s to fade)
+        FREE_THRESHOLD = 220   # SLAM "strongly free" → clear persistence
+        # Decay (saturating subtraction).
+        np.subtract(self._preview_wall_persist, WALL_DECAY,
+                    out=self._preview_wall_persist,
+                    where=self._preview_wall_persist >= WALL_DECAY)
+        self._preview_wall_persist[
+            self._preview_wall_persist < WALL_DECAY] = 0
+        # Strong free observation → instant clear (kills drifted ghosts).
+        self._preview_wall_persist[grid > FREE_THRESHOLD] = 0
+        # Refresh wall observations (255 = full confidence).
+        self._preview_wall_persist[wall_mask] = 255
+
+        wall_mask = self._preview_wall_persist > 0
+        # Persisted walls take priority over freshly-discovered floor.
+        free_mask &= ~wall_mask
+
         # Classify cells into wall / unknown / free → RGB image.
-        # BreezySLAM raw codes after slam.update():
-        #   0           → wall OR border-connected unexplored (we treat as
-        #                 wall here for simplicity; final clean_map.py does
-        #                 the proper flood-fill at save time).
-        #   ~255 (high) → free / scanned floor
         rows, cols = grid.shape
         rgb = np.empty((rows, cols, 3), dtype=np.uint8)
         # Default = unknown gray
         rgb[:] = (210, 215, 222)
-        wall_mask = grid < 64
-        free_mask = grid > 190
         rgb[free_mask] = (255, 255, 255)
         rgb[wall_mask] = (50, 55, 65)
 
@@ -719,6 +885,119 @@ class MapPipeline:
             )
         if res.stdout.strip():
             logger.info("clean_map: %s", res.stdout.strip().splitlines()[-1])
+
+    def _run_slam_toolbox_upgrade(
+        self, jsonl_path: Path, map_dir: Path
+    ) -> Optional[Path]:
+        """Run the slam_toolbox docker container against ``jsonl_path``.
+
+        On success, overwrites ``map_dir/home.pgm`` and ``map_dir/home.yaml``
+        with the slam_toolbox output and returns the new yaml path.  On any
+        failure (image missing, container error, no output, timeout) returns
+        None and leaves the existing map files untouched.
+
+        Tunables (env):
+            ROSIE_SLAM_IMAGE   docker image (default rosie-slam-eval:latest)
+            ROSIE_SLAM_SPEED   replay speed multiplier (default "2")
+            ROSIE_SLAM_SETTLE  post-replay settle seconds (default "20")
+            ROSIE_SLAM_TIMEOUT subprocess timeout seconds (default "1500")
+        """
+        image   = os.environ.get("ROSIE_SLAM_IMAGE",   "rosie-slam-eval:latest")
+        speed   = os.environ.get("ROSIE_SLAM_SPEED",   "2")
+        settle  = os.environ.get("ROSIE_SLAM_SETTLE",  "20")
+        timeout = int(os.environ.get("ROSIE_SLAM_TIMEOUT", "1500"))
+
+        out_dir = Path("/tmp/rosie_slam_out")
+        try:
+            out_dir.mkdir(exist_ok=True)
+            for f in out_dir.iterdir():
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+        except Exception:
+            logger.exception("could not prepare %s", out_dir)
+            return None
+
+        cmd = [
+            "docker", "run", "--rm",
+            "--name", "rosie_slam_eval",
+            # Hard memory cap: keep the container from pushing the host into
+            # OOM-kill / kernel panic territory. 300 MB RAM + swap is enough
+            # for slam_toolbox with the trimmed params we ship.
+            "--memory", os.environ.get("ROSIE_SLAM_MEM", "300m"),
+            "--memory-swap", os.environ.get("ROSIE_SLAM_SWAP", "1500m"),
+            "-v", f"{jsonl_path}:/data/scan.jsonl:ro",
+            "-v", f"{out_dir}:/out",
+            "-e", f"ROSIE_REPLAY_SPEED={speed}",
+            "-e", f"ROSIE_REPLAY_SETTLE={settle}",
+            image,
+        ]
+        logger.info("slam_toolbox: %s", " ".join(cmd))
+        t0 = time.time()
+        try:
+            res = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=timeout, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error("slam_toolbox container timed out after %ds", timeout)
+            # Best-effort kill of dangling container
+            try:
+                subprocess.run(
+                    ["docker", "rm", "-f", "rosie_slam_eval"],
+                    capture_output=True, timeout=15, check=False,
+                )
+            except Exception:
+                pass
+            return None
+        except FileNotFoundError:
+            logger.warning("docker CLI not found — skipping slam_toolbox upgrade")
+            return None
+        elapsed = time.time() - t0
+
+        if res.returncode != 0:
+            logger.error(
+                "slam_toolbox container failed (rc=%s, %.1fs)\nstderr tail:\n%s",
+                res.returncode, elapsed,
+                "\n".join(res.stderr.strip().splitlines()[-15:]),
+            )
+            return None
+
+        src_pgm  = out_dir / "slam_map.pgm"
+        src_yaml = out_dir / "slam_map.yaml"
+        if not (src_pgm.exists() and src_yaml.exists()):
+            logger.error(
+                "slam_toolbox produced no map (pgm=%s yaml=%s)",
+                src_pgm.exists(), src_yaml.exists(),
+            )
+            return None
+
+        # Replace the BreezySLAM home.{pgm,yaml} with slam_toolbox output.
+        dst_pgm  = map_dir / "home.pgm"
+        dst_yaml = map_dir / "home.yaml"
+        try:
+            map_dir.mkdir(parents=True, exist_ok=True)
+            dst_pgm.write_bytes(src_pgm.read_bytes())
+            # Patch yaml.image to point at home.pgm (slam_toolbox writes its
+            # own filename, e.g. "/out/slam_map.pgm").
+            yaml_text = src_yaml.read_text()
+            patched = []
+            for line in yaml_text.splitlines():
+                if line.startswith("image:"):
+                    patched.append(f"image: {dst_pgm.name}")
+                else:
+                    patched.append(line)
+            dst_yaml.write_text("\n".join(patched) + "\n")
+        except Exception:
+            logger.exception("could not copy slam_toolbox output into map_dir")
+            return None
+
+        logger.info(
+            "slam_toolbox upgrade OK in %.1fs (pgm=%d B)",
+            elapsed, dst_pgm.stat().st_size,
+        )
+        return dst_yaml
 
     # =========================================================================
     # Dock pose
@@ -973,6 +1252,14 @@ class MapPipeline:
     def _publish_ha_discovery(self) -> None:
         pfx = self._pfx
 
+        # Remove stale entities from previous driver versions (idempotent —
+        # HA ignores empty retained configs for unknown entities).
+        for _stale in ("button/rosie_start_scan_log",
+                       "button/rosie_stop_scan_log"):
+            self._mqtt._client.publish(
+                f"homeassistant/{_stale}/config", "", qos=1, retain=True,
+            )
+
         # Button: Create New Map
         self._pub_discovery("button", "create_map", {
             "name": "Create New Map",
@@ -990,6 +1277,18 @@ class MapPipeline:
             "payload_press": "reboot",
             "icon": "mdi:restart",
             "entity_category": "config",
+        })
+
+        # Sensor: Scan Log status (state + scans/bytes/duration as attrs)
+        # Recording is driven automatically by the Create New Map pipeline.
+        self._pub_discovery("sensor", "scan_log", {
+            "name": "Scan Log",
+            "unique_id": "rosie_scan_log",
+            "state_topic": f"{pfx}/scan_log/status",
+            "value_template": "{{ value_json.state }}",
+            "json_attributes_topic": f"{pfx}/scan_log/status",
+            "icon": "mdi:notebook-edit",
+            "entity_category": "diagnostic",
         })
 
         # Sensor: Pipeline Status
@@ -1065,7 +1364,7 @@ class MapPipeline:
             "name": "Software Version",
             "unique_id": "rosie_version",
             "state_topic": f"{pfx}/version",
-            "value_template": "{{ value_json.short_sha }}",
+            "value_template": "{{ value_json.version }}",
             "json_attributes_topic": f"{pfx}/version",
             "icon": "mdi:source-branch",
             "entity_category": "diagnostic",
@@ -1083,4 +1382,4 @@ class MapPipeline:
             "entity_category": "diagnostic",
         })
 
-        logger.info("MapPipeline HA discovery published (11 entities)")
+        logger.info("MapPipeline HA discovery published (12 entities)")

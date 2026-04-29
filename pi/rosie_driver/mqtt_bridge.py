@@ -409,6 +409,12 @@ class MQTTBridge:
             ("deactivate", "Deactivate LDS", "mdi:power-off"),
             ("shutdown", "Shutdown Robot", "mdi:power"),
             ("powercycle", "Reboot Robot", "mdi:restart"),
+            # Bumper test (diagnostic) — pulls the corresponding bumper GPIO
+            # pin LOW for ~5s, faking a real bumper switch closure.
+            ("test_bumper_fl", "Bumper Test: Front Left",  "mdi:gesture-tap"),
+            ("test_bumper_fr", "Bumper Test: Front Right", "mdi:gesture-tap"),
+            ("test_bumper_sl", "Bumper Test: Side Left",   "mdi:gesture-tap"),
+            ("test_bumper_sr", "Bumper Test: Side Right",  "mdi:gesture-tap"),
         ]
         for btn_id, label, icon in buttons:
             payload = btn_id
@@ -417,6 +423,8 @@ class MQTTBridge:
             cat = "diagnostic" if btn_id in (
                 "update_status", "clear_errors", "activate", "deactivate",
                 "shutdown", "powercycle",
+                "test_bumper_fl", "test_bumper_fr",
+                "test_bumper_sl", "test_bumper_sr",
             ) else None
             cfg = {
                 "name": label,

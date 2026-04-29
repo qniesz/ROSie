@@ -170,6 +170,19 @@ No-go line responses now use short virtual bumper pulses instead of holding the 
 
 With defaults, side contact gets 3 quick side pulses, then escalates to the matching front bumper only if still touching the line.
 
+### Bumper GPIO Pinout
+
+The four bumper switches are wired between a GPIO pin and GND on the Pi Zero 2 W's 40-pin header. The Pi's internal pull-up keeps each pin HIGH when idle; closing a switch (or the no-go guard / `test_bumper_*` HA buttons driving the pin LOW) registers a hit.
+
+| Bumper | BCM GPIO | Physical Pin | HA Test Button |
+|---|---|---|---|
+| Front Left  | GPIO5  | 29 | `button.rosie_bumper_test_front_left`  |
+| Front Right | GPIO6  | 31 | `button.rosie_bumper_test_front_right` |
+| Side Left   | GPIO13 | 33 | `button.rosie_bumper_test_side_left`   |
+| Side Right  | GPIO26 | 37 | `button.rosie_bumper_test_side_right`  |
+
+GND is available on physical pins 6, 9, 14, 20, 25, 30, 34, and 39. Disable polling with `ROSIE_BUMPER_ENABLED=0` (virtual triggers from `no_go_guard` still work). See [pi/rosie_driver/bumper_sensors.py](pi/rosie_driver/bumper_sensors.py) for full wiring details.
+
 ## ROS 2 Topics
 
 | Topic | Type | Description |

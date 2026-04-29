@@ -17,3 +17,11 @@ __pycache__/
 dist/
 build/
 .venv/
+
+# Local-only working data — generated maps, SLAM replays, scratch backups
+maps/
+replay_out/
+backup/
+tools/
+
+
