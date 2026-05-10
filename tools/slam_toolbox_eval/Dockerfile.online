@@ -1,0 +1,48 @@
+# Online slam_toolbox image — extends the offline eval image with the
+# MQTT<->ROS bridge runtime deps (paho-mqtt, tf2, rmw-cyclonedds).
+# Build on Pi:
+#   docker build -f Dockerfile.online -t rosie-slam-online .
+
+FROM rosie-slam-eval:latest
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-jazzy-rmw-cyclonedds-cpp \
+        ros-jazzy-tf2-ros-py \
+        ros-jazzy-foxglove-bridge \
+  ros-jazzy-robot-state-publisher \
+        python3-paho-mqtt \
+    && rm -rf /var/lib/apt/lists/*
+
+# CycloneDDS no-SHM config: disable shared memory and multicast so the
+# intra-container DDS traffic stays in loopback only.  Saves ~16 MB RSS.
+RUN mkdir -p /cfg && cat > /cfg/cyclonedds_no_shm.xml <<'XML'
+<?xml version="1.0" encoding="UTF-8" ?>
+<CycloneDDS xmlns="https://cdds.io/config" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <Domain id="any">
+    <SharedMemory>
+      <Enable>false</Enable>
+    </SharedMemory>
+    <General>
+      <Interfaces>
+        <NetworkInterface autodetermine="true"/>
+      </Interfaces>
+      <AllowMulticast>false</AllowMulticast>
+    </General>
+    <Internal>
+      <SocketReceiveBufferSize min="default"/>
+    </Internal>
+  </Domain>
+</CycloneDDS>
+XML
+
+COPY mqtt_ros_bridge.py        /eval/mqtt_ros_bridge.py
+COPY rosie_vac_marker.py      /eval/rosie_vac_marker.py
+COPY lifecycle_activate.py     /eval/lifecycle_activate.py
+COPY slam_params_online.yaml   /eval/slam_params_online.yaml
+COPY rosie_foxglove.urdf       /eval/robot/rosie_foxglove.urdf
+COPY run_online.sh             /eval/run_online.sh
+RUN chmod +x /eval/run_online.sh /eval/mqtt_ros_bridge.py /eval/rosie_vac_marker.py /eval/lifecycle_activate.py
+
+ENTRYPOINT ["/eval/run_online.sh"]

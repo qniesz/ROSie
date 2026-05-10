@@ -1,0 +1,27 @@
+{
+  "board": "raspberrypi-zero2w",
+  "backend": "rpi_gpio",
+  "status": "verified",
+  "pins": {
+    "front_left": {
+      "physical_pin": 29,
+      "bcm": 5,
+      "label": "GPIO5"
+    },
+    "front_right": {
+      "physical_pin": 31,
+      "bcm": 6,
+      "label": "GPIO6"
+    },
+    "side_left": {
+      "physical_pin": 33,
+      "bcm": 13,
+      "label": "GPIO13"
+    },
+    "side_right": {
+      "physical_pin": 37,
+      "bcm": 26,
+      "label": "GPIO26"
+    }
+  }
+}

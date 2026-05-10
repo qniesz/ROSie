@@ -1,0 +1,22 @@
+[Unit]
+Description=ROSie WiFi keep-alive — prevents AP from dropping idle client
+# Start only when WiFi is up and the network is online.
+After=network-online.target
+Wants=network-online.target
+# Restart if the main rosie service is running.
+PartOf=rosie.service
+
+[Service]
+Type=simple
+User=root
+# Ping the default gateway every 5 s quietly.
+# This keeps the WiFi association active and prevents the AP from
+# expiring the client entry during slam_toolbox / Foxglove idle gaps.
+# The gateway IP is read from the routing table at startup.
+ExecStartPre=/bin/bash -c 'GW=$(ip route show default | awk "{print \$3; exit}"); echo "WiFi keep-alive: pinging $GW"; echo $GW > /run/rosie-wifi-gw'
+ExecStart=/bin/bash -c 'ping -i 5 -q $(cat /run/rosie-wifi-gw) > /dev/null'
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,2 @@
+# OS packages installed only on Raspberry Pi Zero 2 W
+python3-rpi.gpio

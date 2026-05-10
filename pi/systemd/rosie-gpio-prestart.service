@@ -1,0 +1,22 @@
+[Unit]
+Description=ROSie — hold bumper GPIO as floating INPUT during boot
+# Run as early as possible, without the usual basic.target/sysinit.target chain.
+# We only need gpiochip1 to exist (created by the sunxi-pinctrl driver at
+# kernel init time, well before any userspace services).
+DefaultDependencies=no
+After=dev-gpiochip1.device
+Wants=dev-gpiochip1.device
+# Ensure we are active before rosie.service tries to claim the same pins.
+Before=rosie.service
+
+[Service]
+Type=simple
+User=rosie
+# Use the system python3 — python3-libgpiod is a system package, not in venv.
+ExecStart=/usr/bin/python3 /home/rosie/rosie/pi/scripts/gpio_prestart.py
+Restart=no
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=sysinit.target

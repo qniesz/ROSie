@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<robot name="rosie_foxglove">
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <mesh filename="file:///eval/robot/meshes/rosie_vac_top.dae" scale="1 1 1"/>
+      </geometry>
+      <origin xyz="0 0 0.082" rpy="0 0 0"/>
+    </visual>
+  </link>
+</robot>

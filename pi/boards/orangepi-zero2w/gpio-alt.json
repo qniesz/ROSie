@@ -1,0 +1,32 @@
+{
+  "board": "orangepi-zero2w",
+  "backend": "gpiod",
+  "status": "unverified-dtb-estimate",
+  "notes": "ALTERNATIVE mapping derived from DTB decompile (sun50i-h618-orangepi-zero2w.dtb). H618 PI bank offset=256. Pin29=PI4=260, Pin31=PI5=261, Pin33=PI6=262, Pin37=PI10=266. NOT confirmed against official pinout table — use gpio.json (official wiki) as primary. To activate: ROSIE_GPIO_PROFILE_PATH=~/rosie/pi/boards/orangepi-zero2w/gpio-alt.json",
+  "pins": {
+    "front_left": {
+      "physical_pin": 29,
+      "chip": "/dev/gpiochip1",
+      "line": 260,
+      "label": "PI4"
+    },
+    "front_right": {
+      "physical_pin": 31,
+      "chip": "/dev/gpiochip1",
+      "line": 261,
+      "label": "PI5"
+    },
+    "side_left": {
+      "physical_pin": 33,
+      "chip": "/dev/gpiochip1",
+      "line": 262,
+      "label": "PI6"
+    },
+    "side_right": {
+      "physical_pin": 37,
+      "chip": "/dev/gpiochip1",
+      "line": 266,
+      "label": "PI10"
+    }
+  }
+}

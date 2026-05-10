@@ -1,0 +1,4 @@
+# OS packages installed only on Orange Pi Zero 2 W / Armbian
+gpiod
+libgpiod-dev
+python3-libgpiod

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+CycloneDDS config for the slam_toolbox online container on Pi Zero 2 W.
+- SharedMemory disabled: saves ~16 MB per node (no SHM segment).
+- Multicast ENABLED: required for ROS 2 node discovery.
+- AllowMulticast=spdp keeps participant discovery on multicast but routes
+  data over unicast — small RAM saving without breaking discovery.
+-->
+<CycloneDDS xmlns="https://cdds.io/config" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <Domain id="any">
+    <SharedMemory>
+      <Enable>false</Enable>
+    </SharedMemory>
+    <General>
+      <Interfaces>
+        <NetworkInterface autodetermine="true"/>
+      </Interfaces>
+      <AllowMulticast>spdp</AllowMulticast>
+    </General>
+  </Domain>
+</CycloneDDS>

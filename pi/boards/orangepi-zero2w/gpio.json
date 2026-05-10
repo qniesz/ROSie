@@ -1,0 +1,32 @@
+{
+  "board": "orangepi-zero2w",
+  "backend": "gpiod",
+  "status": "verified-from-official-pinout",
+  "notes": "Lines confirmed from official OrangePi Zero 2W wiki (orangepi.org). gpiochip1=300b000.pinctrl (288 lines, main GPIO). H618 bank offsets: PC=64, PH=224, PI=256. WARNING: All four pins are on bank PI — H618 initializes banks simultaneously, so all pins may briefly go LOW at boot (false bump triggers). Pin31/PI15/line271 and Pin35/PI2/line258 have board-level pull-downs and may malfunction. Mapping: front_right=PI0/pin29, front_left=PI15/pin31, side_left=PI2/pin35, side_right=PI12/pin33 (user request 2026-05-08 — left/right swapped from physical RPi pinout to match actual wiring). Previous mapping had PI16/pin37 for side_right (EMAC0, broken).",
+  "pins": {
+    "front_left": {
+      "physical_pin": 31,
+      "chip": "/dev/gpiochip1",
+      "line": 271,
+      "label": "PI15"
+    },
+    "front_right": {
+      "physical_pin": 29,
+      "chip": "/dev/gpiochip1",
+      "line": 256,
+      "label": "PI0"
+    },
+    "side_left": {
+      "physical_pin": 35,
+      "chip": "/dev/gpiochip1",
+      "line": 258,
+      "label": "PI2"
+    },
+    "side_right": {
+      "physical_pin": 33,
+      "chip": "/dev/gpiochip1",
+      "line": 268,
+      "label": "PI12"
+    }
+  }
+}

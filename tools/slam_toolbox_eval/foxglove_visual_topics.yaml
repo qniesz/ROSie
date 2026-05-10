@@ -1,0 +1,6 @@
+/foxglove_bridge_filtered:
+  ros__parameters:
+    port: 8766
+    address: 0.0.0.0
+    topic_whitelist:
+      - "^/(tf|tf_static|map|map_metadata|scan|rosie_vac_marker)$"

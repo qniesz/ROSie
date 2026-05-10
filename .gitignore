@@ -22,6 +22,12 @@ build/
 maps/
 replay_out/
 backup/
+
+# SD card / U-Boot binary dumps (device-specific, not for public repo)
+*.bin
+
+# Real mosquitto config contains credentials — commit only the .example
+pi/mosquitto/mosquitto.conf
 # Ignore everything under tools/ except the slam_toolbox eval source —
 # Dockerfile + replay node + params need to ship so the Pi can rebuild the
 # image and the runtime params mount can find slam_params.yaml.

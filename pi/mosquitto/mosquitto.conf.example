@@ -1,0 +1,61 @@
+# ROSie local MQTT broker — loopback-only listener + bridge to Home Assistant.
+#
+# All scan/odom/pose traffic stays on 127.0.0.1 (never crosses the LAN).
+# Telemetry and commands are bridged to the HA Mosquitto add-on.
+#
+# Copy this file to mosquitto.conf and fill in your values.
+# Credentials: must match MQTT_USER / MQTT_PASS in ~/rosie-driver.env.
+
+# ── Local listener ──────────────────────────────────────────────────────────
+# Bind to loopback only — nothing outside the Pi can reach this broker.
+listener 1883 127.0.0.1
+allow_anonymous true
+
+# Persist retained messages so driver/map state survives a broker restart.
+persistence true
+persistence_location /mosquitto/data/
+
+# ── Bridge to Home Assistant ────────────────────────────────────────────────
+connection ha_bridge
+address YOUR_HA_IP:1883
+remote_username YOUR_MQTT_USER
+remote_password YOUR_MQTT_PASS
+
+bridge_protocol_version mqttv311
+# cleansession false — preserve retained messages and QoS 1 state across reconnects
+cleansession false
+try_private true
+restart_timeout 5
+keepalive_interval 30
+
+# ── Outgoing: driver telemetry → HA ────────────────────────────────────────
+# topic <pattern> out <qos> <local-prefix> <remote-prefix>
+topic availability out 1 rosie/ rosie/
+topic battery out 1 rosie/ rosie/
+topic state out 1 rosie/ rosie/
+topic settings out 1 rosie/ rosie/
+topic spot_config out 1 rosie/ rosie/
+topic nogo_lines out 1 rosie/ rosie/
+topic nogo_status out 1 rosie/ rosie/
+topic nogo_debug out 0 rosie/ rosie/
+topic bumpers out 0 rosie/ rosie/
+topic bumper_events out 0 rosie/ rosie/
+topic vacuum_state out 1 rosie/ rosie/
+topic neato_sensors out 1 rosie/ rosie/
+topic tuning/nogo out 1 rosie/ rosie/
+topic scan_log/status out 1 rosie/ rosie/
+topic map_image out 1 rosie/ rosie/
+topic map_meta out 1 rosie/ rosie/
+topic map_pipeline/status out 1 rosie/ rosie/
+topic slam_toolbox/status out 1 rosie/ rosie/
+topic ha_discovery/# out 1 rosie/ rosie/
+
+# ── Incoming: HA commands → driver ─────────────────────────────────────────
+# topic <pattern> in <qos> <local-prefix> <remote-prefix>
+topic command in 1 rosie/ rosie/
+topic cmd_vel in 0 rosie/ rosie/
+topic settings/+/set in 1 rosie/ rosie/
+topic spot_width/set in 1 rosie/ rosie/
+topic spot_height/set in 1 rosie/ rosie/
+topic nav_mode/set in 1 rosie/ rosie/
+topic vacuum_motor/set in 1 rosie/ rosie/

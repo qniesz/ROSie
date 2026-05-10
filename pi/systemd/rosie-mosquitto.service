@@ -1,0 +1,26 @@
+[Unit]
+Description=ROSie local MQTT broker (Mosquitto loopback + HA bridge)
+After=docker.service network-online.target
+Wants=docker.service
+# Must be fully up before the driver tries to connect on 127.0.0.1:1883
+Before=rosie.service
+
+[Service]
+Type=simple
+User=rosie
+# Remove any stale container from a previous crash before starting
+ExecStartPre=-/usr/bin/docker rm -f rosie-mosquitto
+ExecStart=/usr/bin/docker run --rm \
+    --name rosie-mosquitto \
+    --network host \
+    -v /home/rosie/rosie/pi/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro \
+    -v /home/rosie/mosquitto-data:/mosquitto/data \
+    eclipse-mosquitto:2
+ExecStop=/usr/bin/docker stop rosie-mosquitto
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
