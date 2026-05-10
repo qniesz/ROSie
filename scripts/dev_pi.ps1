@@ -15,7 +15,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("help", "dev-mode", "sync", "sync-runtime", "check", "restart", "status", "logs", "collect-logs", "release-check")]
+    [ValidateSet("help", "dev-mode", "setup-ssh", "sync", "sync-runtime", "check", "restart", "status", "logs", "collect-logs", "release-check")]
     [string]$Command,
 
     [Parameter(Position = 1, ValueFromRemainingArguments = $true)]
@@ -78,6 +78,7 @@ function Show-Usage {
 ROSie Pi development helper
 
 Usage:
+    .\scripts\dev_pi.ps1 setup-ssh
     .\scripts\dev_pi.ps1 dev-mode on|off
     .\scripts\dev_pi.ps1 sync <relative-path> [more paths]
     .\scripts\dev_pi.ps1 sync-runtime
@@ -141,9 +142,11 @@ if (-not $PiHost -or -not $User) {
 $script:Target = "$User@$PiHost"
 $script:RemoteRepo = "/home/$User/rosie"
 $script:RemoteVenv = "/home/$User/rosie-venv"
-$script:KnownHostsFile = Join-Path $env:USERPROFILE ".ssh\rosie_known_hosts"
-if (-not (Test-Path (Split-Path $script:KnownHostsFile -Parent))) {
-    New-Item -ItemType Directory -Path (Split-Path $script:KnownHostsFile -Parent) -Force | Out-Null
+$script:SshDir = Join-Path $env:USERPROFILE ".ssh"
+$script:KnownHostsFile = Join-Path $script:SshDir "rosie_known_hosts"
+$script:SshKeyFile = Join-Path $script:SshDir "rosie_id"
+if (-not (Test-Path $script:SshDir)) {
+    New-Item -ItemType Directory -Path $script:SshDir -Force | Out-Null
 }
 if (-not (Test-Path $script:KnownHostsFile)) {
     New-Item -ItemType File -Path $script:KnownHostsFile -Force | Out-Null
@@ -161,6 +164,9 @@ $script:SshBaseOpts = @(
     "-o", "ServerAliveCountMax=40",
     "-o", "ConnectTimeout=15"
 )
+if (Test-Path $script:SshKeyFile) {
+    $script:SshBaseOpts += @("-i", $script:SshKeyFile, "-o", "PasswordAuthentication=no")
+}
 
 $script:ScpBaseOpts = @(
     "-P", "$Port",
@@ -171,6 +177,9 @@ $script:ScpBaseOpts = @(
     "-o", "LogLevel=ERROR",
     "-o", "UserKnownHostsFile=$script:KnownHostsFile"
 )
+if (Test-Path $script:SshKeyFile) {
+    $script:ScpBaseOpts += @("-i", $script:SshKeyFile, "-o", "PasswordAuthentication=no")
+}
 
 function Invoke-Pi {
     param(
@@ -442,6 +451,31 @@ switch ($Command) {
             return
         }
         Invoke-Pi "journalctl -u rosie -n $Lines --no-pager" -AllowFail
+    }
+    "setup-ssh" {
+        if (Test-Path $script:SshKeyFile) {
+            Write-Host "SSH key already exists at $script:SshKeyFile" -ForegroundColor Green
+        } else {
+            Write-Step "Generating SSH key at $script:SshKeyFile"
+            $kfEsc = $script:SshKeyFile -replace '"', '\"'
+            $proc = Start-Process -FilePath "ssh-keygen.exe" `
+                -ArgumentList "-t ed25519 -f `"$kfEsc`" -N `"`" -C rosie-dev" `
+                -NoNewWindow -Wait -PassThru
+            if ($proc.ExitCode -ne 0) { throw "ssh-keygen failed" }
+        }
+        $pubKey = Get-Content "$script:SshKeyFile.pub" -Raw
+        $pubKey = $pubKey.Trim()
+        Write-Step "Copying public key to $script:Target (you will be prompted for your password once)"
+        $remoteCmd = "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '$pubKey' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+        $sshNoKey = @(
+            "-p", "$Port",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "UserKnownHostsFile=$script:KnownHostsFile",
+            "-o", "LogLevel=ERROR"
+        )
+        & ssh.exe @sshNoKey $script:Target $remoteCmd
+        if ($LASTEXITCODE -ne 0) { throw "Failed to install public key on Pi" }
+        Write-Host "SSH key installed. Password prompts are gone." -ForegroundColor Green
     }
     "collect-logs" {
         Collect-Logs
