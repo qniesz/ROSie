@@ -1349,7 +1349,7 @@ class MapPipeline:
             "command_topic": f"{pfx}/command",
             "payload_press": "reboot",
             "icon": "mdi:restart",
-            "entity_category": "config",
+            "entity_category": "diagnostic",
         })
 
         # Sensor: Scan Log status (state + scans/bytes/duration as attrs)
@@ -1420,7 +1420,7 @@ class MapPipeline:
             "command_topic": f"{pfx}/command",
             "payload_press": "update",
             "icon": "mdi:update",
-            "entity_category": "config",
+            "entity_category": "diagnostic",
         })
 
         # Sensor: Last Update
