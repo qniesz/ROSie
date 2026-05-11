@@ -65,6 +65,19 @@ _lines          = list(DEFAULT_LINES)
 _trigger_callback = None   # fn(x, y, line_idx, dist) — called on first TAP-ON
 
 
+def set_footprint(
+    half_length: float | None = None,
+    half_width: float | None = None,
+) -> None:
+    """Update the robot footprint used for no-go line proximity checks."""
+    global HALF_LENGTH, HALF_WIDTH
+    if half_length is not None:
+        HALF_LENGTH = float(half_length)
+    if half_width is not None:
+        HALF_WIDTH = float(half_width)
+    logger.debug("[no_go_guard] footprint updated: half_length=%.3f half_width=%.3f", HALF_LENGTH, HALF_WIDTH)
+
+
 def set_touch_callback(fn: Optional[Callable[[str, bool, bool], None]]) -> None:
     """Register a callback invoked when a channel's touch state changes.
 
