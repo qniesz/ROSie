@@ -481,6 +481,45 @@ if ($existCheck.Output.Trim() -eq "EXISTS") {
     Write-Host ""
 }
 
+# --- Background docker build helper (SSH-drop tolerant) ----------------------
+# docker build takes 20-40 min on a Pi Zero. SSH connections silently drop over
+# WiFi after long idle periods. Running the build via nohup on the Pi and
+# polling every 30s with short independent SSH connections avoids this.
+function Invoke-PiDockerBuild {
+    param(
+        [Parameter(Mandatory)][string]$Tag,
+        [Parameter(Mandatory)][string]$BuildCmd,
+        [int]$TimeoutMinutes = 60
+    )
+    $slug     = $Tag -replace '[:/]', '_'
+    $logFile  = "/tmp/docker_build_${slug}.log"
+    $doneFile = "/tmp/docker_build_${slug}.done"
+    # Remove any stale sentinel from a previous run
+    Invoke-Pi "rm -f $doneFile" -UseKey -AllowFail | Out-Null
+    # Launch build in background; write exit code to sentinel file when done.
+    # Backtick-escaped `" and `$ prevent PowerShell from expanding them so
+    # bash receives the literal double-quotes and $? variable.
+    $bgCmd = "nohup bash -c `"$BuildCmd > $logFile 2>&1; echo `$? > $doneFile`" </dev/null &"
+    Invoke-Pi $bgCmd -UseKey -AllowFail | Out-Null
+    $pollSecs = 30
+    $maxPolls = [int]($TimeoutMinutes * 60 / $pollSecs)
+    Write-Host "       Build started on Pi (log: $logFile) -- polling every ${pollSecs}s, up to ${TimeoutMinutes} min..." -ForegroundColor Gray
+    for ($p = 1; $p -le $maxPolls; $p++) {
+        Start-Sleep -Seconds $pollSecs
+        $done = (Invoke-Pi "if [ -f $doneFile ]; then cat $doneFile; else echo WAIT; fi" -UseKey -AllowFail).Output.Trim()
+        if ($done -ne "WAIT") {
+            $exitCode = [int]$done
+            $tail = (Invoke-Pi "tail -10 $logFile 2>/dev/null" -UseKey -AllowFail).Output
+            Invoke-Pi "rm -f $logFile $doneFile" -UseKey -AllowFail | Out-Null
+            return [pscustomobject]@{ ExitCode = $exitCode; Output = $tail }
+        }
+        $elapsed = $p * $pollSecs
+        Write-Host "       ...still building ($($elapsed)s elapsed)" -ForegroundColor DarkGray
+    }
+    $tail = (Invoke-Pi "tail -10 $logFile 2>/dev/null" -UseKey -AllowFail).Output
+    return [pscustomobject]@{ ExitCode = 1; Output = "TIMEOUT after ${TimeoutMinutes} min`n$tail" }
+}
+
 try {
 
     # --- Hardware verification + board detection ----------------------------
@@ -735,10 +774,12 @@ APT::Periodic::AutocleanInterval `"7`";
     Write-OK
 
     # --- Build slam_toolbox Docker images ------------------------------------
+
     Write-Step "Building slam_toolbox offline image (rosie-slam-eval:latest)"
-    Write-Host "       This compiles ros:jazzy + slam_toolbox + Ceres (~20-30 min on Pi Zero)" -ForegroundColor Gray
-    Write-Host "       You can follow progress with: ssh $script:PiUser@$script:PiHost docker build ..." -ForegroundColor DarkGray
-    $slamBuild = Invoke-Pi "docker build -t rosie-slam-eval:latest ~/rosie/tools/slam_toolbox_eval 2>&1 | tail -5" -UseKey -AllowFail
+    Write-Host "       This compiles ros:jazzy + slam_toolbox + Ceres (~20-40 min on Pi Zero)" -ForegroundColor Gray
+    $slamBuild = Invoke-PiDockerBuild -Tag "rosie-slam-eval:latest" `
+        -BuildCmd "docker build -t rosie-slam-eval:latest ~/rosie/tools/slam_toolbox_eval" `
+        -TimeoutMinutes 75
     if ($slamBuild.ExitCode -ne 0) {
         Write-Warn "slam_toolbox offline image build failed (non-fatal). Output:`n$($slamBuild.Output)"
         Write-Host "       Re-run manually on Pi: docker build -t rosie-slam-eval:latest ~/rosie/tools/slam_toolbox_eval" -ForegroundColor Gray
@@ -750,7 +791,9 @@ APT::Periodic::AutocleanInterval `"7`";
         Write-Step "Building slam_toolbox online image (rosie-slam-online:latest)"
         Write-Host "       Extends rosie-slam-eval with MQTT/ROS bridge (~5-10 min)" -ForegroundColor Gray
         Write-Host "       Required: the Pi driver uses this image for live SLAM pose." -ForegroundColor Yellow
-        $slamOnlineBuild = Invoke-Pi "docker build -f ~/rosie/tools/slam_toolbox_eval/Dockerfile.online -t rosie-slam-online:latest ~/rosie/tools/slam_toolbox_eval 2>&1 | tail -5" -UseKey -AllowFail
+        $slamOnlineBuild = Invoke-PiDockerBuild -Tag "rosie-slam-online:latest" `
+            -BuildCmd "docker build -f ~/rosie/tools/slam_toolbox_eval/Dockerfile.online -t rosie-slam-online:latest ~/rosie/tools/slam_toolbox_eval" `
+            -TimeoutMinutes 30
         if ($slamOnlineBuild.ExitCode -ne 0) {
             Write-Warn "slam_toolbox online image build failed. The rosie.service will start but SLAM pose will be unavailable until you build it manually."
             Write-Host "       Re-run on Pi: docker build -f ~/rosie/tools/slam_toolbox_eval/Dockerfile.online -t rosie-slam-online:latest ~/rosie/tools/slam_toolbox_eval" -ForegroundColor Gray
