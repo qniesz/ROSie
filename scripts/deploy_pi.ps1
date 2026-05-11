@@ -287,7 +287,7 @@ if ($cfgPath) {
 
 $script:PiHost      = Get-Setting -Cfg $cfg -Key "Pi_IP_address"    -Prompt "Pi IP address      (e.g. 192.168.x.x)"
 $script:PiUser      = Get-Setting -Cfg $cfg -Key "Pi_username"      -Prompt "Pi username        (e.g. rosie)" -Default "rosie"
-$PiBootstrapUser    = Get-Setting -Cfg $cfg -Key "Pi_bootstrap_user" -Prompt "Pi bootstrap user  (e.g. root for Armbian, rosie for RPi OS)" -Default $script:PiUser
+$PiBootstrapUser    = Get-Setting -Cfg $cfg -Key "Armbian_bootstrap_user" -Prompt "Armbian bootstrap user (Armbian only; blank = Pi username)" -Default $script:PiUser
 $PiBoardType        = Get-Setting -Cfg $cfg -Key "Pi_board_type"    -Prompt "Pi board type      (auto / raspberrypi / orangepi)" -Default "auto"
 $MqttHost           = Get-Setting -Cfg $cfg -Key "MQTT_broker"      -Prompt "MQTT broker / HA IP (e.g. 192.168.x.x)"
 $MqttPort      = Get-Setting -Cfg $cfg -Key "MQTT_port"     -Prompt "MQTT port          (press Enter for 1883)" -Default "1883"
@@ -342,11 +342,17 @@ try {
     Write-Fail "Cannot reach $script:PiHost on port 22: $_`n       Check that the Pi is powered on, connected to the network, and the IP address in ROSie.conf is correct."
 }
 # Port 22 is open - now wait for SSH to be fully ready (avoids mid-boot failures)
+$script:KeyPath = Join-Path $env:USERPROFILE ".ssh\rosie_deploy_ed25519"
 $sshReady = $false
 for ($i = 1; $i -le 12; $i++) {
-    $testArgs = @() + $script:SshBaseOpts + @("-i", (Join-Path $env:USERPROFILE ".ssh\rosie_deploy_ed25519"), "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "$script:PiUser@$script:PiHost", "echo READY")
+    $testArgs = @() + $script:SshBaseOpts + @("-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "$script:PiUser@$script:PiHost", "echo READY")
+    if (Test-Path $script:KeyPath) {
+        $testArgs = @() + $script:SshBaseOpts + @("-i", $script:KeyPath, "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "$script:PiUser@$script:PiHost", "echo READY")
+    }
     $r = Invoke-NativeCapture -Exe "ssh.exe" -Arguments $testArgs
     if ($r.ExitCode -eq 0 -and $r.Output -match "READY") { $sshReady = $true; break }
+    # Also accept a password-auth rejection as "SSH is ready" (key just not installed yet)
+    if ($r.ExitCode -eq 255 -and $r.Output -notmatch "timed out|Connection refused") { $sshReady = $true; break }
     Write-Host "       SSH not ready yet (attempt $i/12) - waiting 5s..." -ForegroundColor DarkGray
     Start-Sleep -Seconds 5
 }
@@ -372,7 +378,6 @@ Write-OK
 
 # --- SSH key setup (the ONE interactive step) --------------------------------
 Write-Step "Setting up SSH key authentication"
-$script:KeyPath = Join-Path $env:USERPROFILE ".ssh\rosie_deploy_ed25519"
 $pubPath = "$script:KeyPath.pub"
 if (-not (Test-Path $pubPath)) {
     Write-Host "       Generating dedicated ed25519 deploy key at $script:KeyPath..." -ForegroundColor Gray
@@ -401,23 +406,48 @@ if ($testKey.ExitCode -eq 0 -and $testKey.Output -match "KEY_OK") {
     Write-Host "       You will be prompted for the $(if ($useBootstrap) { $PiBootstrapUser } else { 'Pi' }) password ONCE now." -ForegroundColor Yellow
     Write-Host "       After this, every step runs non-interactively over SSH key auth." -ForegroundColor Gray
 
-    $installKeyCmd = "set -e; umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; if ! grep -qxF '$pubKeyEsc' ~/.ssh/authorized_keys; then printf '%s\\n' '$pubKeyEsc' >> ~/.ssh/authorized_keys; fi; echo KEY_INSTALLED_OK"
+    $installKeyCmd = "set -e; umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; if ! grep -qxF '$pubKeyEsc' ~/.ssh/authorized_keys; then printf '%s\\n' '$pubKeyEsc' >> ~/.ssh/authorized_keys; fi"
 
-    # Push key to the bootstrap user first (e.g. root on Armbian)
+    # Build SSH opts for this one interactive step:
+    #   1. Strip LogLevel=ERROR - Windows OpenSSH routes the "password:" prompt
+    #      through a log-gated code path; ERROR level suppresses it silently.
+    #   2. Force password-only auth so the (doomed) pubkey attempt is skipped.
+    $installOpts = @()
+    for ($ii = 0; $ii -lt $script:SshBaseOpts.Count; $ii++) {
+        if ($script:SshBaseOpts[$ii] -eq "-o" -and
+            ($ii + 1) -lt $script:SshBaseOpts.Count -and
+            $script:SshBaseOpts[$ii + 1] -like "LogLevel=*") {
+            $ii++; continue   # drop the "-o","LogLevel=..." pair
+        }
+        $installOpts += $script:SshBaseOpts[$ii]
+    }
+    $installOpts += @(
+        "-o", "PubkeyAuthentication=no",
+        "-o", "PasswordAuthentication=yes",
+        "-o", "PreferredAuthentications=keyboard-interactive,password"
+    )
+
     $installTarget = if ($useBootstrap) { $bootTarget } else { $target }
-    $sshArgs = @() + $script:SshBaseOpts + @($installTarget, $installKeyCmd)
-    $keyInstall = Invoke-NativeCapture -Exe "ssh.exe" -Arguments $sshArgs
-    if ($keyInstall.ExitCode -ne 0 -or $keyInstall.Output -notmatch "KEY_INSTALLED_OK") {
-        Write-Fail "SSH key install failed. Output:`n$($keyInstall.Output)"
+    if (-not [string]::IsNullOrEmpty($PiPassword)) {
+        Write-Host "       Enter this password at the prompt:" -ForegroundColor Yellow
+    }
+    $sshArgs = $installOpts + @($installTarget, $installKeyCmd)
+    $oldEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & ssh.exe @sshArgs
+    $keyInstallExit = $LASTEXITCODE
+    $ErrorActionPreference = $oldEap
+    if ($keyInstallExit -ne 0) {
+        Write-Fail "SSH key install failed (exit $keyInstallExit). Verify the password in ROSie.conf is correct and that PasswordAuthentication is enabled in the Pi's sshd_config."
     }
 
     # On Armbian: also install key for PiUser (the normal user) via root
     if ($useBootstrap) {
         Write-Host "       Installing key for $script:PiUser via $PiBootstrapUser..." -ForegroundColor Gray
-        $userKeyCmd = "set -e; HOME2=/home/$script:PiUser; umask 077; mkdir -p `$HOME2/.ssh; touch `$HOME2/.ssh/authorized_keys; chmod 700 `$HOME2/.ssh; chmod 600 `$HOME2/.ssh/authorized_keys; if ! grep -qxF '$pubKeyEsc' `$HOME2/.ssh/authorized_keys; then printf '%s\\n' '$pubKeyEsc' >> `$HOME2/.ssh/authorized_keys; fi; chown -R $script:PiUser:`$script:PiUser `$HOME2/.ssh; echo KEY_INSTALLED_OK"
+        $userKeyCmd = "set -e; HOME2=/home/$script:PiUser; umask 077; mkdir -p `$HOME2/.ssh; touch `$HOME2/.ssh/authorized_keys; chmod 700 `$HOME2/.ssh; chmod 600 `$HOME2/.ssh/authorized_keys; if ! grep -qxF '$pubKeyEsc' `$HOME2/.ssh/authorized_keys; then printf '%s\\n' '$pubKeyEsc' >> `$HOME2/.ssh/authorized_keys; fi; chown -R $script:PiUser:`$script:PiUser `$HOME2/.ssh"
         $rootSshArgs = @() + $script:SshBaseOpts + @($bootTarget, $userKeyCmd)
         $rootInstall = Invoke-NativeCapture -Exe "ssh.exe" -Arguments $rootSshArgs
-        if ($rootInstall.ExitCode -ne 0 -or $rootInstall.Output -notmatch "KEY_INSTALLED_OK") {
+        if ($rootInstall.ExitCode -ne 0) {
             Write-Fail "SSH key install for $script:PiUser via $PiBootstrapUser failed. Output:`n$($rootInstall.Output)"
         }
     }
