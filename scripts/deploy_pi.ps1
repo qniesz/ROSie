@@ -149,6 +149,36 @@ function Invoke-PiSudo {
     }
 }
 
+# Run a remote command as root using a password piped to sudo -S.
+# Used only during the one-time sudo bootstrap before NOPASSWD is in place.
+function Invoke-PiSudoWithPass {
+    param(
+        [Parameter(Mandatory)][string]$Command,
+        [Parameter(Mandatory)][string]$Password,
+        [switch]$AllowFail
+    )
+    $target = "$script:PiUser@$script:PiHost"
+    $sshArgs = @() + $script:SshBaseOpts + @(
+        "-o", "BatchMode=yes",
+        "-o", "PasswordAuthentication=no",
+        "-o", "PreferredAuthentications=publickey"
+    )
+    if ($script:KeyPath -and (Test-Path $script:KeyPath)) {
+        $sshArgs += @("-i", $script:KeyPath, "-o", "IdentitiesOnly=yes")
+    }
+    # Escape single quotes in password for bash single-quoted string.
+    $passEsc = $Password.Replace("'", "'\''")
+    # Pipe the password to sudo entirely on the remote side.
+    # Avoids Windows->SSH stdin forwarding issues with sudo -S.
+    $remoteCmd = "printf '%s\n' '$passEsc' | sudo -S -p '' $Command"
+    $sshArgs += @($target, $remoteCmd)
+    $native = Invoke-NativeCapture -Exe "ssh.exe" -Arguments $sshArgs
+    if (-not $AllowFail -and $native.ExitCode -ne 0) {
+        Write-Fail "Remote sudo (password) failed (exit $($native.ExitCode))`n  cmd : $Command`n  out : $($native.Output)"
+    }
+    return $native
+}
+
 # Copy a file to the Pi using scp.exe with the same option set.
 function Copy-ToPi {
     param(
@@ -199,6 +229,9 @@ function Read-RosieConfig {
         if ($idx -lt 1) { continue }
         $key = $trim.Substring(0, $idx).Trim()
         $val = $trim.Substring($idx + 1).Trim()
+        # Strip inline comments (e.g. "value   # comment")
+        $commentIdx = $val.IndexOf(" #")
+        if ($commentIdx -ge 0) { $val = $val.Substring(0, $commentIdx).Trim() }
         $cfg[$key] = $val
     }
     return $cfg
@@ -245,9 +278,11 @@ if ($cfgPath) {
     Write-Host ""
 }
 
-$script:PiHost = Get-Setting -Cfg $cfg -Key "Pi_IP_address" -Prompt "Pi IP address      (e.g. 192.168.x.x)"
-$script:PiUser = Get-Setting -Cfg $cfg -Key "Pi_username"   -Prompt "Pi username        (e.g. rosie)"
-$MqttHost      = Get-Setting -Cfg $cfg -Key "MQTT_broker"   -Prompt "MQTT broker / HA IP (e.g. 192.168.x.x)"
+$script:PiHost      = Get-Setting -Cfg $cfg -Key "Pi_IP_address"    -Prompt "Pi IP address      (e.g. 192.168.x.x)"
+$script:PiUser      = Get-Setting -Cfg $cfg -Key "Pi_username"      -Prompt "Pi username        (e.g. rosie)" -Default "rosie"
+$PiBootstrapUser    = Get-Setting -Cfg $cfg -Key "Pi_bootstrap_user" -Prompt "Pi bootstrap user  (e.g. root for Armbian, rosie for RPi OS)" -Default $script:PiUser
+$PiBoardType        = Get-Setting -Cfg $cfg -Key "Pi_board_type"    -Prompt "Pi board type      (auto / raspberrypi / orangepi)" -Default "auto"
+$MqttHost           = Get-Setting -Cfg $cfg -Key "MQTT_broker"      -Prompt "MQTT broker / HA IP (e.g. 192.168.x.x)"
 $MqttPort      = Get-Setting -Cfg $cfg -Key "MQTT_port"     -Prompt "MQTT port          (press Enter for 1883)" -Default "1883"
 $MqttUser      = Get-Setting -Cfg $cfg -Key "MQTT_username" -Prompt "MQTT username"
 $MqttPassSec   = Get-Setting -Cfg $cfg -Key "MQTT_password" -Prompt "MQTT password" -Secure
@@ -258,8 +293,14 @@ if ([string]::IsNullOrWhiteSpace($MqttPort)) { $MqttPort = "1883" }
 $ManualUpdates = Get-Setting -Cfg $cfg -Key "manual_updates" -Prompt "Disable scheduled auto-updates (true/false)" -Default "false"
 if ([string]::IsNullOrWhiteSpace($ManualUpdates)) { $ManualUpdates = "false" }
 
-$MqttPass = [System.Net.NetworkCredential]::new("", $MqttPassSec).Password
-$GitToken = [System.Net.NetworkCredential]::new("", $GitTokenSec).Password
+$BuildSlamOnline = Get-Setting -Cfg $cfg -Key "build_slam_online" -Prompt "Build slam-online image on Pi (true/false, ~20-30 min)" -Default "false"
+if ([string]::IsNullOrWhiteSpace($BuildSlamOnline)) { $BuildSlamOnline = "false" }
+
+$PiPassSec = Get-Setting -Cfg $cfg -Key "Pi_password" -Prompt "Pi password         (for sudo bootstrap)" -Secure
+
+$MqttPass  = [System.Net.NetworkCredential]::new("", $MqttPassSec).Password
+$GitToken  = [System.Net.NetworkCredential]::new("", $GitTokenSec).Password
+$PiPassword = [System.Net.NetworkCredential]::new("", $PiPassSec).Password
 if ($GitToken -eq "public") { $GitToken = "" }
 
 Write-Host ""
@@ -304,20 +345,42 @@ if (-not (Test-Path $pubPath)) {
 $pubKey = (Get-Content $pubPath -Raw).Trim()
 $pubKeyEsc = $pubKey.Replace("'", "'""'""'")
 
-Write-Host "       You will be prompted for the Pi password ONCE now." -ForegroundColor Yellow
-Write-Host "       After this, every step runs non-interactively over SSH key auth." -ForegroundColor Gray
+# On Armbian (Orange Pi), the first-boot user is root; on Raspberry Pi OS it's
+# the normal user. We push the key as the bootstrap user, then also install it
+# for PiUser if they differ.
+$target       = "$script:PiUser@$script:PiHost"
+$bootTarget   = "$PiBootstrapUser@$script:PiHost"
+$useBootstrap = ($PiBootstrapUser -ne $script:PiUser)
 
-# Install the public key + normalise permissions as a one-line remote command.
-# This avoids CRLF issues that can appear when sending multiline scripts from
-# Windows to ssh stdin.
-$installKeyCmd = "set -e; umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; if ! grep -qxF '$pubKeyEsc' ~/.ssh/authorized_keys; then printf '%s\\n' '$pubKeyEsc' >> ~/.ssh/authorized_keys; fi; echo KEY_INSTALLED_OK"
+# Check if key auth already works before prompting for a password.
+$testKeyArgs = @() + $script:SshBaseOpts + @("-i", $script:KeyPath, "-o", "BatchMode=yes", $target, "echo KEY_OK")
+$testKey = Invoke-NativeCapture -Exe "ssh.exe" -Arguments $testKeyArgs
+if ($testKey.ExitCode -eq 0 -and $testKey.Output -match "KEY_OK") {
+    Write-Host "       Key auth already works - skipping password prompt." -ForegroundColor Gray
+} else {
+    Write-Host "       You will be prompted for the $(if ($useBootstrap) { $PiBootstrapUser } else { 'Pi' }) password ONCE now." -ForegroundColor Yellow
+    Write-Host "       After this, every step runs non-interactively over SSH key auth." -ForegroundColor Gray
 
-$target = "$script:PiUser@$script:PiHost"
-# NOTE: no BatchMode here - we WANT the interactive password prompt this one time.
-$sshArgs = @() + $script:SshBaseOpts + @($target, $installKeyCmd)
-$keyInstall = Invoke-NativeCapture -Exe "ssh.exe" -Arguments $sshArgs
-if ($keyInstall.ExitCode -ne 0 -or $keyInstall.Output -notmatch "KEY_INSTALLED_OK") {
-    Write-Fail "SSH key install failed. Output:`n$($keyInstall.Output)"
+    $installKeyCmd = "set -e; umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; if ! grep -qxF '$pubKeyEsc' ~/.ssh/authorized_keys; then printf '%s\\n' '$pubKeyEsc' >> ~/.ssh/authorized_keys; fi; echo KEY_INSTALLED_OK"
+
+    # Push key to the bootstrap user first (e.g. root on Armbian)
+    $installTarget = if ($useBootstrap) { $bootTarget } else { $target }
+    $sshArgs = @() + $script:SshBaseOpts + @($installTarget, $installKeyCmd)
+    $keyInstall = Invoke-NativeCapture -Exe "ssh.exe" -Arguments $sshArgs
+    if ($keyInstall.ExitCode -ne 0 -or $keyInstall.Output -notmatch "KEY_INSTALLED_OK") {
+        Write-Fail "SSH key install failed. Output:`n$($keyInstall.Output)"
+    }
+
+    # On Armbian: also install key for PiUser (the normal user) via root
+    if ($useBootstrap) {
+        Write-Host "       Installing key for $script:PiUser via $PiBootstrapUser..." -ForegroundColor Gray
+        $userKeyCmd = "set -e; HOME2=/home/$script:PiUser; umask 077; mkdir -p `$HOME2/.ssh; touch `$HOME2/.ssh/authorized_keys; chmod 700 `$HOME2/.ssh; chmod 600 `$HOME2/.ssh/authorized_keys; if ! grep -qxF '$pubKeyEsc' `$HOME2/.ssh/authorized_keys; then printf '%s\\n' '$pubKeyEsc' >> `$HOME2/.ssh/authorized_keys; fi; chown -R $script:PiUser:`$script:PiUser `$HOME2/.ssh; echo KEY_INSTALLED_OK"
+        $rootSshArgs = @() + $script:SshBaseOpts + @($bootTarget, $userKeyCmd)
+        $rootInstall = Invoke-NativeCapture -Exe "ssh.exe" -Arguments $rootSshArgs
+        if ($rootInstall.ExitCode -ne 0 -or $rootInstall.Output -notmatch "KEY_INSTALLED_OK") {
+            Write-Fail "SSH key install for $script:PiUser via $PiBootstrapUser failed. Output:`n$($rootInstall.Output)"
+        }
+    }
 }
 Write-OK
 
@@ -331,13 +394,30 @@ Write-OK
 
 try {
 
-    # --- Hardware verification -------------------------------------------------
-    Write-Step "Verifying hardware"
-    $modelRaw = (Invoke-Pi "cat /proc/device-tree/model 2>/dev/null || grep Model /proc/cpuinfo 2>/dev/null | head -1 || echo unknown" -UseKey -AllowFail).Output
+    # --- Hardware verification + board detection ----------------------------
+    Write-Step "Verifying hardware and detecting board"
+    $modelRaw = (Invoke-Pi "cat /proc/device-tree/model 2>/dev/null || grep Model /proc/cpuinfo 2>/dev/null | head -1 || echo unknown" -UseKey -AllowFail).Output.Trim()
+    Write-Host "       Detected: $modelRaw" -ForegroundColor Gray
+
+    # Resolve board profile
+    $script:BoardProfile = switch -Wildcard ($PiBoardType.ToLower()) {
+        "raspberrypi"  { "raspberrypi-zero2w" }
+        "orangepi"     { "orangepi-zero2w" }
+        default {
+            if ($modelRaw -match "Orange ?Pi")       { "orangepi-zero2w" }
+            elseif ($modelRaw -match "Raspberry Pi") { "raspberrypi-zero2w" }
+            else {
+                Write-Warn "Could not auto-detect board from: $modelRaw"
+                $cont = Read-Host "  Continue assuming raspberrypi-zero2w? (y/N)"
+                if ($cont -ne "y") { throw "Aborted by user" }
+                "raspberrypi-zero2w"
+            }
+        }
+    }
+    Write-Host "       Board profile: $script:BoardProfile" -ForegroundColor Gray
+
     if ($modelRaw -notmatch "Pi Zero 2") {
-        Write-Warn "Expected Pi Zero 2 W, detected: $($modelRaw.Trim())"
-        $cont = Read-Host "  Continue anyway? (y/N)"
-        if ($cont -ne "y") { throw "Aborted by user" }
+        Write-Warn "Expected Pi Zero 2 W model string, got: $modelRaw"
     } else {
         Write-OK
     }
@@ -347,22 +427,31 @@ try {
     }
 
     # --- Sudo check -----------------------------------------------------------
-    # We need passwordless sudo to install system files. On a fresh Raspberry
-    # Pi OS install, the default user (rosie) is in the sudo group with
-    # NOPASSWD via /etc/sudoers.d/010_pi-nopasswd. If that isn't the case,
-    # stop with a clear message - there is no clean way to drive `sudo -S`
-    # non-interactively from ssh.exe without storing the password.
     Write-Step "Checking passwordless sudo"
     $sudoCheck = Invoke-Pi "sudo -n true" -UseKey -AllowFail
     if ($sudoCheck.ExitCode -ne 0) {
-        Write-Fail @"
-Passwordless sudo is required for this installer.
-On the Pi, run (once) as the rosie user:
-  sudo visudo -f /etc/sudoers.d/010_rosie-nopasswd
-and add this line:
-  $script:PiUser ALL=(ALL) NOPASSWD:ALL
-Then re-run this script.
-"@
+        Write-Host "       Passwordless sudo not set up - bootstrapping via Pi password..." -ForegroundColor Yellow
+        if ([string]::IsNullOrEmpty($PiPassword)) {
+            Write-Fail "Pi password is required to bootstrap passwordless sudo. Add Pi_password to ROSie.conf and re-run."
+        }
+        # Write the NOPASSWD sudoers entry using the Pi password.
+        # Strategy: write to /tmp as the normal user (no sudo, no quoting issues),
+        # then use simple sudo commands (cp + chmod) with no shell metacharacters.
+        $sudoersLine = "$script:PiUser ALL=(ALL) NOPASSWD:ALL"
+        # Write to /tmp first (no sudo needed), then sudo-copy to sudoers.d.
+        Invoke-Pi "printf '%s\n' '$sudoersLine' > /tmp/rosie-sudoers-bootstrap" -UseKey | Out-Null
+        $cpResult = Invoke-PiSudoWithPass -Command "cp /tmp/rosie-sudoers-bootstrap /etc/sudoers.d/010_rosie-nopasswd" -Password $PiPassword -AllowFail
+        if ($cpResult.ExitCode -ne 0) {
+            Write-Fail "Could not bootstrap passwordless sudo (wrong password?). Output:`n$($cpResult.Output)"
+        }
+        Invoke-PiSudoWithPass -Command "chmod 440 /etc/sudoers.d/010_rosie-nopasswd" -Password $PiPassword | Out-Null
+        Invoke-Pi "rm -f /tmp/rosie-sudoers-bootstrap" -UseKey -AllowFail | Out-Null
+        # Verify it worked.
+        $sudoCheck2 = Invoke-Pi "sudo -n true" -UseKey -AllowFail
+        if ($sudoCheck2.ExitCode -ne 0) {
+            Write-Fail "Passwordless sudo still not working after bootstrap. Output:`n$($sudoCheck2.Output)"
+        }
+        Write-Host "       Bootstrapped /etc/sudoers.d/010_rosie-nopasswd" -ForegroundColor Gray
     }
     Write-OK
 
@@ -379,13 +468,25 @@ Then re-run this script.
     $pkgGroups = [ordered]@{
         "build tools (gcc, python3-dev, python3-venv, git)"            = "gcc python3-dev python3-venv git"
         "system services (unattended-upgrades, mosquitto-clients)"     = "unattended-upgrades mosquitto-clients fonts-dejavu-core"
-        "python libs (numpy, scipy, pillow, serial, RPi.GPIO, psutil)" = "python3-numpy python3-scipy python3-pil python3-serial python3-rpi.gpio python3-psutil"
+        "python libs (numpy, scipy, pillow, serial, psutil)"           = "python3-numpy python3-scipy python3-pil python3-serial python3-psutil"
+        "docker (for slam_toolbox offline + online images)"            = "docker.io"
     }
     foreach ($label in $pkgGroups.Keys) {
         Write-Host ("       installing {0}..." -f $label) -ForegroundColor Gray
         $grp = $pkgGroups[$label]
         Invoke-PiSudo "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $grp" | Out-Null
         Write-Host "           done" -ForegroundColor DarkGray
+    }
+
+    # Board-specific packages
+    $boardPkgFile = Join-Path $PSScriptRoot "..\pi\boards\$script:BoardProfile\packages.txt"
+    if (Test-Path $boardPkgFile) {
+        $boardPkgs = (Get-Content $boardPkgFile | Where-Object { $_ -notmatch '^\s*#' -and $_ -notmatch '^\s*$' }) -join " "
+        if ($boardPkgs) {
+            Write-Host "       installing board-specific packages ($script:BoardProfile): $boardPkgs" -ForegroundColor Gray
+            Invoke-PiSudo "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $boardPkgs" | Out-Null
+            Write-Host "           done" -ForegroundColor DarkGray
+        }
     }
     Write-OK
 
@@ -429,7 +530,7 @@ Then re-run this script.
     # Build the file locally, scp it over - this way the MQTT password never
     # appears on any remote command line.
     $tmpEnv = [System.IO.Path]::GetTempFileName()
-    $envBody = @(
+    $envLines = [System.Collections.Generic.List[string]]@(
         "MQTT_HOST=$MqttHost",
         "MQTT_PORT=$MqttPort",
         "MQTT_USER=$MqttUser",
@@ -437,7 +538,19 @@ Then re-run this script.
         "MQTT_PREFIX=rosie",
         "ROSIE_SERIAL_PORT=/dev/ttyACM0",
         "ROSIE_MANUAL_UPDATES=$ManualUpdates"
-    ) -join "`n"
+    )
+    # Append board-specific env vars from the board profile's env.example
+    $boardEnvFile = Join-Path $PSScriptRoot "..\pi\boards\$script:BoardProfile\env.example"
+    if (Test-Path $boardEnvFile) {
+        foreach ($line in (Get-Content $boardEnvFile)) {
+            $trimmed = $line.Trim()
+            if ($trimmed -ne "" -and -not $trimmed.StartsWith("#")) {
+                $envLines.Add($trimmed)
+            }
+        }
+        Write-Host "       appended board env vars from $script:BoardProfile" -ForegroundColor Gray
+    }
+    $envBody = $envLines -join "`n"
     # Write with LF line endings and no BOM
     [System.IO.File]::WriteAllText($tmpEnv, $envBody + "`n", [System.Text.UTF8Encoding]::new($false))
     try {
@@ -499,21 +612,35 @@ APT::Periodic::AutocleanInterval `"7`";
     Invoke-PiSudo "bash -c 'grep -q Automatic-Reboot /etc/apt/apt.conf.d/50unattended-upgrades || echo ''Unattended-Upgrade::Automatic-Reboot \""false\"";'' >> /etc/apt/apt.conf.d/50unattended-upgrades'" | Out-Null
     Write-OK
 
-    # --- Verify service -------------------------------------------------------
-    Write-Step "Waiting for service to stabilise (5 s)"
-    Start-Sleep -Seconds 5
-    $svc = (Invoke-Pi "systemctl is-active rosie" -UseKey -AllowFail).Output.Trim()
-    if ($svc -eq "active") {
-        Write-OK
-        Write-Host ""
-        Write-Host "  ROSie is running!" -ForegroundColor Green
-        Write-Host "  Check Home Assistant entities in ~30 seconds." -ForegroundColor Green
+    # --- Build slam_toolbox Docker images ------------------------------------
+    Write-Step "Building slam_toolbox offline image (rosie-slam-eval:latest)"
+    Write-Host "       This compiles ros:jazzy + slam_toolbox + Ceres (~20-30 min on Pi Zero)" -ForegroundColor Gray
+    Write-Host "       You can follow progress with: ssh $script:PiUser@$script:PiHost docker build ..." -ForegroundColor DarkGray
+    $slamBuild = Invoke-Pi "docker build -t rosie-slam-eval:latest ~/rosie/tools/slam_toolbox_eval 2>&1 | tail -5" -UseKey -AllowFail
+    if ($slamBuild.ExitCode -ne 0) {
+        Write-Warn "slam_toolbox offline image build failed (non-fatal). Output:`n$($slamBuild.Output)"
+        Write-Host "       Re-run manually on Pi: docker build -t rosie-slam-eval:latest ~/rosie/tools/slam_toolbox_eval" -ForegroundColor Gray
     } else {
-        Write-Warn "Service status: $svc"
-        Write-Host "  Run this to see why:" -ForegroundColor Yellow
-        Write-Host "    ssh $script:PiUser@$script:PiHost 'journalctl -u rosie -n 50 --no-pager'" -ForegroundColor Gray
-        Write-Host "  Common cause: Neato not plugged in yet (driver retries automatically)" -ForegroundColor Gray
+        Write-OK
     }
+
+    if ($BuildSlamOnline -eq "true") {
+        Write-Step "Building slam_toolbox online image (rosie-slam-online:latest)"
+        Write-Host "       Extends rosie-slam-eval with MQTT/ROS bridge (~5-10 min)" -ForegroundColor Gray
+        $slamOnlineBuild = Invoke-Pi "docker build -f ~/rosie/tools/slam_toolbox_eval/Dockerfile.online -t rosie-slam-online:latest ~/rosie/tools/slam_toolbox_eval 2>&1 | tail -5" -UseKey -AllowFail
+        if ($slamOnlineBuild.ExitCode -ne 0) {
+            Write-Warn "slam_toolbox online image build failed (non-fatal). Output:`n$($slamOnlineBuild.Output)"
+            Write-Host "       Re-run manually on Pi: docker build -f ~/rosie/tools/slam_toolbox_eval/Dockerfile.online -t rosie-slam-online:latest ~/rosie/tools/slam_toolbox_eval" -ForegroundColor Gray
+        } else {
+            Write-OK
+        }
+    }
+
+    # --- Reboot ---------------------------------------------------------------
+    Write-Step "Rebooting Pi to apply all changes"
+    Write-Host "       The Pi will reboot now. Reconnect in ~30 seconds." -ForegroundColor Yellow
+    Invoke-Pi "sudo reboot" -UseKey -AllowFail | Out-Null
+    Write-OK
 
     # --- Summary --------------------------------------------------------------
     Write-Host ""
