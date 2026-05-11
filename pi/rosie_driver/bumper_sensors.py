@@ -1,16 +1,9 @@
 """
 bumper_sensors.py — Physical bump switch reader.
 
-Four digital bump switches (normally open, pulled to GND when triggered):
-
-    GPIO5  (physical pin 29) — Front Left
-    GPIO6  (physical pin 31) — Front Right
-    GPIO13 (physical pin 33) — Side Left
-    GPIO26 (physical pin 37) — Side Right
-
-Each switch connects between the GPIO pin and GND.
-The Pi's internal pull-up keeps the pin HIGH when idle.
-When the switch closes (bumped), the pin is pulled LOW.
+Board-agnostic: uses gpio_backend.py which auto-detects Raspberry Pi
+(RPi.GPIO / BCM numbering) or Orange Pi (gpiod / chip+line numbering)
+based on /proc/device-tree/model and the board gpio.json profile.
 
 Behaviour on trigger (physical or virtual):
   - Publishes bumper state to MQTT (rosie/bumpers)
@@ -32,59 +25,36 @@ from typing import TYPE_CHECKING, Callable, Optional
 if TYPE_CHECKING:
     from .mqtt_bridge import MQTTBridge
 
-try:
-    import RPi.GPIO as GPIO  # type: ignore[import-not-found]
-except (ImportError, RuntimeError):
-    GPIO = None
+from .gpio_backend import BumperGpioBackend, NullGpioBackend, create_bumper_gpio
+from .gpio_pins import BUMPER_CHANNELS
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-PIN_FRONT_LEFT  = 5    # GPIO5  — front left bump
-PIN_FRONT_RIGHT = 6    # GPIO6  — front right bump
-PIN_SIDE_LEFT   = 13   # GPIO13 — side left bump
-PIN_SIDE_RIGHT  = 26   # GPIO26 — side right bump
-
 POLL_HZ       = 20     # reads per second
 DEBOUNCE_SECS = 0.03   # 30 ms debounce before confirming a press
-
-_PINS = [
-    (PIN_FRONT_LEFT,  "front_left"),
-    (PIN_FRONT_RIGHT, "front_right"),
-    (PIN_SIDE_LEFT,   "side_left"),
-    (PIN_SIDE_RIGHT,  "side_right"),
-]
 
 # ---------------------------------------------------------------------------
 # Module state
 # ---------------------------------------------------------------------------
 _thread: threading.Thread | None = None
 _stop_event = threading.Event()
+_backend: BumperGpioBackend | None = None
 _gpio_ready = False
 _mqtt: "MQTTBridge | None" = None
 _stop_callback: Optional[Callable[[], None]] = None
 _state_lock = threading.Lock()
 
 # Current reported state (False = not triggered)
-_state: dict[str, bool] = {
-    "front_left":  False,
-    "front_right": False,
-    "side_left":   False,
-    "side_right":  False,
-}
+_state: dict[str, bool] = {ch: False for ch in BUMPER_CHANNELS}
 
-# Debounce tracking: pin → timestamp of first sustained LOW reading
-_low_since: dict[int, float] = {}
+# Debounce tracking: key → timestamp of first sustained LOW reading
+_low_since: dict[str, float] = {}
 
 # Per-channel virtual pulse timers
-_virtual_timers: dict[str, threading.Timer | None] = {
-    "front_left": None,
-    "front_right": None,
-    "side_left": None,
-    "side_right": None,
-}
+_virtual_timers: dict[str, threading.Timer | None] = {ch: None for ch in BUMPER_CHANNELS}
 
 # Set True while test_pin() is driving a pin LOW — suppresses stop callback
 _test_active: bool = False
@@ -104,24 +74,20 @@ _enabled = _env_flag("ROSIE_BUMPER_ENABLED", default=True)
 # Internal helpers
 # ---------------------------------------------------------------------------
 def _setup_gpio() -> bool:
-    global _gpio_ready
-    if GPIO is None:
-        logger.warning("[bumper_sensors] RPi.GPIO not available — physical bumpers disabled")
-        return False
+    global _backend, _gpio_ready
+    b = create_bumper_gpio()
     try:
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setwarnings(False)
-        for pin, _ in _PINS:
-            GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_OFF)
-        _gpio_ready = True
-        logger.info(
-            "[bumper_sensors] GPIO ready — FL=GPIO%d FR=GPIO%d SL=GPIO%d SR=GPIO%d (floating)",
-            PIN_FRONT_LEFT, PIN_FRONT_RIGHT, PIN_SIDE_LEFT, PIN_SIDE_RIGHT,
-        )
-        return True
+        ok = b.setup()
     except Exception as exc:
         logger.error("[bumper_sensors] GPIO setup failed: %s", exc)
         return False
+    _backend = b
+    if not ok or isinstance(b, NullGpioBackend):
+        logger.warning("[bumper_sensors] GPIO not available — %s", b.describe())
+        return False
+    _gpio_ready = True
+    logger.info("[bumper_sensors] GPIO ready — %s", b.describe())
+    return True
 
 
 def _publish(new_state: dict[str, bool]) -> None:
@@ -159,26 +125,26 @@ def _poll_loop() -> None:
     while not _stop_event.is_set():
         now = time.monotonic()
 
-        if _gpio_ready and GPIO is not None:
+        if _gpio_ready and _backend is not None:
             try:
                 new_state = dict(_state)
                 any_new_trigger = False
 
-                for pin, key in _PINS:
-                    raw_low = GPIO.input(pin) == GPIO.LOW
+                for key in BUMPER_CHANNELS:
+                    raw_low = _backend.read_low(key)
 
                     if raw_low:
-                        if pin not in _low_since:
-                            _low_since[pin] = now
-                        if (now - _low_since[pin]) >= DEBOUNCE_SECS and not _state[key]:
+                        if key not in _low_since:
+                            _low_since[key] = now
+                        if (now - _low_since[key]) >= DEBOUNCE_SECS and not _state[key]:
                             new_state[key] = True
                             any_new_trigger = True
-                            logger.info("[bumper_sensors] %s triggered (GPIO%d)", key, pin)
+                            logger.info("[bumper_sensors] %s triggered (%s)", key, _backend.pin_display(key))
                     else:
-                        _low_since.pop(pin, None)
+                        _low_since.pop(key, None)
                         if _state[key]:
                             new_state[key] = False
-                            logger.info("[bumper_sensors] %s released (GPIO%d)", key, pin)
+                            logger.info("[bumper_sensors] %s released (%s)", key, _backend.pin_display(key))
 
                 if new_state != _state:
                     _publish(new_state)
@@ -273,7 +239,7 @@ def trigger_virtual(
 def release_virtual() -> None:
     """Clear virtual bumper states, returning all pins to INPUT/floating."""
     # Release every pin back to INPUT so the Neato sees no bumper pressed.
-    for key in _PIN_BY_KEY:
+    for key in BUMPER_CHANNELS:
         _release_pin(key)
 
     with _state_lock:
@@ -282,15 +248,10 @@ def release_virtual() -> None:
                 timer.cancel()
                 _virtual_timers[key] = None
 
-        if not _gpio_ready or GPIO is None:
+        if not _gpio_ready or _backend is None:
             new_state = {k: False for k in _state}
         else:
-            new_state = {
-                "front_left":  GPIO.input(PIN_FRONT_LEFT)  == GPIO.LOW,
-                "front_right": GPIO.input(PIN_FRONT_RIGHT) == GPIO.LOW,
-                "side_left":   GPIO.input(PIN_SIDE_LEFT)   == GPIO.LOW,
-                "side_right":  GPIO.input(PIN_SIDE_RIGHT)  == GPIO.LOW,
-            }
+            new_state = {key: _backend.read_low(key) for key in BUMPER_CHANNELS}
         changed = new_state != _state
 
     if changed:
@@ -303,47 +264,35 @@ def set_stop_callback(fn: Optional[Callable[[], None]]) -> None:
     _stop_callback = fn
 
 
-_PIN_BY_KEY = {
-    "front_left":  PIN_FRONT_LEFT,
-    "front_right": PIN_FRONT_RIGHT,
-    "side_left":   PIN_SIDE_LEFT,
-    "side_right":  PIN_SIDE_RIGHT,
-}
-
-
 def _drive_pin_low(key: str) -> None:
     """Switch a bumper pin to OUTPUT LOW to fake a switch closure to the Neato."""
-    pin = _PIN_BY_KEY.get(key)
-    if pin is None or GPIO is None or not _gpio_ready:
+    if _backend is None or not _gpio_ready:
         return
     try:
-        GPIO.setup(pin, GPIO.OUT)
-        GPIO.output(pin, GPIO.LOW)
-        logger.info("[bumper_sensors] PIN %s (GPIO%d) -> LOW (press)", key, pin)
+        _backend.drive_low(key)
+        logger.info("[bumper_sensors] %s (%s) -> LOW (press)", key, _backend.pin_display(key))
     except Exception as exc:
         logger.error("[bumper_sensors] _drive_pin_low(%s) failed: %s", key, exc)
 
 
 def _release_pin(key: str) -> None:
     """Switch a bumper pin back to INPUT/floating so the Neato sees the switch released."""
-    pin = _PIN_BY_KEY.get(key)
-    if pin is None or GPIO is None or not _gpio_ready:
+    if _backend is None or not _gpio_ready:
         return
     try:
-        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_OFF)
-        logger.info("[bumper_sensors] PIN %s (GPIO%d) -> INPUT (release)", key, pin)
+        _backend.release(key)
+        logger.info("[bumper_sensors] %s (%s) -> INPUT (release)", key, _backend.pin_display(key))
     except Exception as exc:
         logger.error("[bumper_sensors] _release_pin(%s) failed: %s", key, exc)
 
 
 def test_pin(key: str, hold_secs: float = 5.0) -> None:
-    """Drive a bumper pin LOW for *hold_secs*, then restore to INPUT w/ PUD_UP.
+    """Drive a bumper pin LOW for *hold_secs*, then restore to INPUT/floating.
 
     Used by the HA "Bumper Test" buttons so the user can verify wiring
     with a multimeter or confirm the poll loop detects the transition.
     """
-    pin = _PIN_BY_KEY.get(key)
-    if pin is None or GPIO is None or not _gpio_ready:
+    if _backend is None or not _gpio_ready:
         logger.warning("[bumper_sensors] test_pin(%s) — GPIO not ready", key)
         return
 
@@ -351,14 +300,13 @@ def test_pin(key: str, hold_secs: float = 5.0) -> None:
         global _test_active
         _test_active = True
         try:
-            GPIO.setup(pin, GPIO.OUT)
-            GPIO.output(pin, GPIO.LOW)
-            logger.info("[bumper_sensors] test_pin(%s) GPIO%d → LOW", key, pin)
+            _backend.drive_low(key)
+            logger.info("[bumper_sensors] test_pin(%s) %s → LOW", key, _backend.pin_display(key))
             time.sleep(hold_secs)
         finally:
             _test_active = False
-            GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_OFF)
-            logger.info("[bumper_sensors] test_pin(%s) GPIO%d → INPUT/floating", key, pin)
+            _backend.release(key)
+            logger.info("[bumper_sensors] test_pin(%s) %s → INPUT/floating", key, _backend.pin_display(key))
 
     threading.Thread(target=_drive, name=f"test_pin_{key}", daemon=True).start()
 
