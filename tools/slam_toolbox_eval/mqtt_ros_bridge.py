@@ -43,6 +43,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from builtin_interfaces.msg import Time as TimeMsg
 from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import OccupancyGrid
 from geometry_msgs.msg import TransformStamped
 from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
 from tf2_ros import Buffer, TransformListener
@@ -112,6 +113,15 @@ class BridgeNode(Node):
         st.transform.translation.x = -0.165  # 165 mm aft (back-centre of 13 in robot)
         st.transform.rotation.w = 1.0
         self.static_br.sendTransform(st)
+
+        # ── ROS /map subscriber (for live HA preview during mapping) ──
+        map_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        self.create_subscription(OccupancyGrid, "map", self._on_map, map_qos)
+        self._last_map_pub: float = 0.0
 
         # ── ROS TF listener for map -> base_link (slam_toolbox output) ──
         # 2 s cache (default is 10 s) — at 5 Hz publish rate this is plenty
@@ -274,6 +284,107 @@ class BridgeNode(Node):
             self.odom_count += 1
         except Exception as e:
             self.get_logger().warning(f"odom publish failed: {e}")
+
+    # ── ROS -> MQTT (/map live preview) ───────────────────────────
+    def _on_map(self, msg: OccupancyGrid):
+        """Render an OccupancyGrid to a base64 JPEG and publish to map_image.
+
+        Only fires during MAPPING mode and at most every 5 s to keep CPU
+        and MQTT payload load manageable on the Pi Zero 2 W.
+        """
+        if self.slam_mode != "mapping":
+            return
+        now = time.time()
+        if now - self._last_map_pub < 5.0:
+            return
+        self._last_map_pub = now
+
+        try:
+            import numpy as np
+            from PIL import Image as PILImage, ImageDraw as PILImageDraw, ImageFont as PILImageFont
+            import base64
+            import io as _io
+        except ImportError as exc:
+            self.get_logger().warning(f"_on_map: missing dep {exc}")
+            return
+
+        try:
+            w = msg.info.width
+            h = msg.info.height
+            if w == 0 or h == 0:
+                return
+            res   = msg.info.resolution          # m/px
+            ox    = msg.info.origin.position.x   # map-frame x at pixel col 0
+            oy    = msg.info.origin.position.y   # map-frame y at pixel row 0
+
+            # OccupancyGrid: -1=unknown, 0=free, 100=occupied
+            # ROS convention: row 0 = bottom of map (min y)
+            data = np.array(msg.data, dtype=np.int8).reshape((h, w))
+
+            # Build RGB image (row 0 of PIL = top → flip vertically)
+            rgb = np.empty((h, w, 3), dtype=np.uint8)
+            rgb[:] = (210, 215, 222)              # default: unknown gray
+            rgb[data == 0]   = (255, 255, 255)    # free: white
+            rgb[data == 100] = (50,  55,  65)     # occupied: dark
+            # flip so north is up in the image
+            rgb = np.flipud(rgb)
+
+            img = PILImage.fromarray(rgb, "RGB")
+            img = img.resize((w * 2, h * 2), PILImage.NEAREST)
+            draw = PILImageDraw.Draw(img)
+
+            scale = 2
+            def world_to_px(wx: float, wy: float):
+                """Map-frame metres → pixel coords in the 2× upscaled image."""
+                col = int((wx - ox) / res) * scale
+                row = int((h - 1 - (wy - oy) / res)) * scale
+                return col, row
+
+            # Dock marker at map origin (robot starts at dock = (0,0) in map frame).
+            dx, dy = world_to_px(0.0, 0.0)
+            r = 8
+            draw.ellipse([dx - r, dy - r, dx + r, dy + r],
+                         fill=(34, 170, 85), outline=(20, 120, 60), width=2)
+
+            # Robot marker from latest map→base_link TF.
+            try:
+                tf_ = self.tf_buf.lookup_transform(
+                    "map", "base_link", rclpy.time.Time(),
+                    timeout=rclpy.duration.Duration(seconds=0.05))
+                rx = tf_.transform.translation.x
+                ry = tf_.transform.translation.y
+                q  = tf_.transform.rotation
+                rth = yaw_from_quat(q.x, q.y, q.z, q.w)
+                px, py = world_to_px(rx, ry)
+                r = 7
+                draw.ellipse([px - r, py - r, px + r, py + r],
+                             fill=(41, 121, 255), outline=(20, 70, 200), width=2)
+                tip = r * 1.8
+                tx = px + tip * math.cos(rth)
+                ty = py - tip * math.sin(rth)
+                lx = px + r * 0.6 * math.cos(rth + 2.4)
+                ly = py - r * 0.6 * math.sin(rth + 2.4)
+                rx2 = px + r * 0.6 * math.cos(rth - 2.4)
+                ry2 = py - r * 0.6 * math.sin(rth - 2.4)
+                draw.polygon([(tx, ty), (lx, ly), (rx2, ry2)], fill=(255, 255, 255))
+            except (LookupException, ConnectivityException, ExtrapolationException):
+                pass
+
+            # Watermark.
+            try:
+                font = PILImageFont.truetype(
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
+            except (OSError, IOError):
+                font = PILImageFont.load_default()
+            draw.text((10, 10), "LIVE \u2014 SLAM Toolbox mapping",
+                      fill=(220, 60, 60), font=font)
+
+            buf = _io.BytesIO()
+            img.save(buf, "JPEG", quality=70, optimize=True)
+            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            self.mq.publish(f"{self.prefix}/map_image", b64, qos=0, retain=True)
+        except Exception as exc:
+            self.get_logger().warning(f"_on_map render failed: {exc}")
 
     # ── ROS -> MQTT (pose) ───────────────────────────────────────────
     def _tick_pose(self):

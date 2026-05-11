@@ -12,13 +12,14 @@ set -euo pipefail
 DETACH=""
 [[ "${1:-}" == "-d" ]] && DETACH="-d"
 
-mkdir -p /home/rosie/slam-online/out
+mkdir -p /home/rosie/slam_maps
+mkdir -p /home/rosie/slam_online_out
 
 exec docker run --rm $DETACH \
     --name slam_online \
     --network host \
-    --memory=240m --memory-swap=600m \
+    --memory=300m --memory-swap=1500m \
     --env-file /home/rosie/rosie-driver.env \
-    -v /home/rosie/slam-online/cyclonedds.xml:/cfg/cyclonedds_no_shm.xml:ro \
-    -v /home/rosie/slam-online/out:/out \
+    -v /home/rosie/slam_maps:/slam_maps \
+    -v /home/rosie/slam_online_out:/out \
     rosie-slam-online

@@ -94,10 +94,11 @@ class MQTTBridge:
             Callable[[list], tuple[bool, str, list[dict[str, list[float]]]]]
         ] = None
         self._nogo_tuning_callback: Optional[Callable[[str, float], None]] = None
-        self._slam_pose_callback: Optional[Callable[[float, float, float], None]] = None
+        self._slam_pose_callback: Optional[Callable] = None
 
         # Latest SLAM-corrected pose from ROS 2 (map frame)
-        self._slam_pose: Optional[tuple] = None  # (x, y, theta) or None
+        # Stored as (x, y, theta, receive_stamp, meta_dict)
+        self._slam_pose: Optional[tuple] = None
         self._slam_lock = threading.Lock()
 
         # Local state for spot config & settings (for HA number/select entities)
@@ -141,7 +142,7 @@ class MQTTBridge:
 
     def set_slam_pose_callback(
         self,
-        cb: Callable[[float, float, float], None],
+        cb: Callable,
     ) -> None:
         self._slam_pose_callback = cb
 
@@ -155,9 +156,12 @@ class MQTTBridge:
         self.publish("bumper_event", record, retain=False)
 
     def get_slam_pose(self) -> Optional[tuple]:
-        """Return latest SLAM pose (x, y, theta) or None if not yet available."""
+        """Return (x, y, theta, age_s, meta) or None if not yet available."""
         with self._slam_lock:
-            return self._slam_pose
+            if self._slam_pose is None:
+                return None
+            sx, sy, sth, stamp, meta = self._slam_pose
+        return (sx, sy, sth, time.monotonic() - stamp, meta)
 
     def connect(self) -> None:
         logger.info("Connecting to MQTT broker %s:%d", self._host, self._port)
@@ -692,10 +696,16 @@ class MQTTBridge:
                 sx = float(data['x'])
                 sy = float(data['y'])
                 sth = float(data['theta'])
+                meta = {
+                    "mode": data.get("mode", "unknown"),
+                    "map_id": data.get("map_id", ""),
+                    "map_name": data.get("map_name", ""),
+                    "src": data.get("src", ""),
+                }
                 with self._slam_lock:
-                    self._slam_pose = (sx, sy, sth)
+                    self._slam_pose = (sx, sy, sth, time.monotonic(), meta)
                 if self._slam_pose_callback:
-                    self._slam_pose_callback(sx, sy, sth)
+                    self._slam_pose_callback(sx, sy, sth, meta)
             except (json.JSONDecodeError, ValueError, KeyError) as exc:
                 logger.warning("Invalid pose payload: %s — %s", payload, exc)
 

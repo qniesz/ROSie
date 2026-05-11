@@ -293,8 +293,8 @@ if ([string]::IsNullOrWhiteSpace($MqttPort)) { $MqttPort = "1883" }
 $ManualUpdates = Get-Setting -Cfg $cfg -Key "manual_updates" -Prompt "Disable scheduled auto-updates (true/false)" -Default "false"
 if ([string]::IsNullOrWhiteSpace($ManualUpdates)) { $ManualUpdates = "false" }
 
-$BuildSlamOnline = Get-Setting -Cfg $cfg -Key "build_slam_online" -Prompt "Build slam-online image on Pi (true/false, ~20-30 min)" -Default "false"
-if ([string]::IsNullOrWhiteSpace($BuildSlamOnline)) { $BuildSlamOnline = "false" }
+$BuildSlamOnline = Get-Setting -Cfg $cfg -Key "build_slam_online" -Prompt "Build slam-online image on Pi (true/false, ~20-30 min)" -Default "true"
+    if ([string]::IsNullOrWhiteSpace($BuildSlamOnline)) { $BuildSlamOnline = "true" }
 
 $PiPassSec = Get-Setting -Cfg $cfg -Key "Pi_password" -Prompt "Pi password         (for sudo bootstrap)" -Secure
 
@@ -512,12 +512,9 @@ try {
 
     # --- Python venv ----------------------------------------------------------
     Write-Step "Creating Python venv and installing packages"
-    Write-Host "       (breezyslam compiles C - allow ~3 min on Pi Zero)" -ForegroundColor Gray
+    Write-Host "       (pip install from zero_requirements.txt - ~1-2 min on Pi Zero)" -ForegroundColor Gray
     Invoke-Pi "python3 -m venv --system-site-packages ~/rosie-venv" -UseKey | Out-Null
-    Write-Host "       installing paho-mqtt..." -ForegroundColor Gray
-    Invoke-Pi "~/rosie-venv/bin/pip install -q paho-mqtt==1.6.1" -UseKey | Out-Null
-    Write-Host "       building BreezySLAM from source (this is the slow part)..." -ForegroundColor Gray
-    Invoke-Pi "~/rosie-venv/bin/pip install -q 'git+https://github.com/simondlevy/BreezySLAM.git#subdirectory=python'" -UseKey | Out-Null
+    Invoke-Pi "~/rosie-venv/bin/pip install -q -r ~/rosie/pi/zero_requirements.txt" -UseKey | Out-Null
     Write-OK
 
     # --- Maps directory -------------------------------------------------------
@@ -627,13 +624,17 @@ APT::Periodic::AutocleanInterval `"7`";
     if ($BuildSlamOnline -eq "true") {
         Write-Step "Building slam_toolbox online image (rosie-slam-online:latest)"
         Write-Host "       Extends rosie-slam-eval with MQTT/ROS bridge (~5-10 min)" -ForegroundColor Gray
+        Write-Host "       Required: the Pi driver uses this image for live SLAM pose." -ForegroundColor Yellow
         $slamOnlineBuild = Invoke-Pi "docker build -f ~/rosie/tools/slam_toolbox_eval/Dockerfile.online -t rosie-slam-online:latest ~/rosie/tools/slam_toolbox_eval 2>&1 | tail -5" -UseKey -AllowFail
         if ($slamOnlineBuild.ExitCode -ne 0) {
-            Write-Warn "slam_toolbox online image build failed (non-fatal). Output:`n$($slamOnlineBuild.Output)"
-            Write-Host "       Re-run manually on Pi: docker build -f ~/rosie/tools/slam_toolbox_eval/Dockerfile.online -t rosie-slam-online:latest ~/rosie/tools/slam_toolbox_eval" -ForegroundColor Gray
+            Write-Warn "slam_toolbox online image build failed. The rosie.service will start but SLAM pose will be unavailable until you build it manually."
+            Write-Host "       Re-run on Pi: docker build -f ~/rosie/tools/slam_toolbox_eval/Dockerfile.online -t rosie-slam-online:latest ~/rosie/tools/slam_toolbox_eval" -ForegroundColor Gray
         } else {
             Write-OK
         }
+    } else {
+        Write-Warn "build_slam_online=false: skipping rosie-slam-online image build. SLAM pose will be unavailable until you build it manually."
+        Write-Host "       Re-run on Pi: docker build -f ~/rosie/tools/slam_toolbox_eval/Dockerfile.online -t rosie-slam-online:latest ~/rosie/tools/slam_toolbox_eval" -ForegroundColor Gray
     }
 
     # --- Reboot ---------------------------------------------------------------

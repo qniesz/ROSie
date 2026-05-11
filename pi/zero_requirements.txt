@@ -9,9 +9,9 @@
 #
 # Notes:
 #   - paho-mqtt MUST stay <2.0 (breaking API changes in v2).
-#   - breezyslam is compiled from C; needs gcc + python3-dev.
-#     On Pi OS Bookworm: sudo apt install gcc python3-dev  (already present).
 #   - psutil is optional; diagnostics are skipped if not installed.
+#   - SLAM is provided by the rosie-slam-online Docker container which runs
+#     SLAM Toolbox (ROS 2 Jazzy) and publishes pose via MQTT.
 
 # --- Serial / MQTT (same as Pi 4 driver) ---
 pyserial>=3.5
@@ -22,10 +22,6 @@ RPi.GPIO>=0.7
 numpy>=1.24
 scipy>=1.10
 Pillow>=9.4
-
-# --- BreezySLAM (replaces SLAM Toolbox) ---
-# Pure-C core wrapped in Python; compiles in ~2 min on Pi Zero 2 W.
-breezyslam>=0.9.1
 
 # --- Diagnostics (optional but recommended) ---
 psutil>=5.9
