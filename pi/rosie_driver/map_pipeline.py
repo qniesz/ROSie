@@ -530,6 +530,32 @@ class MapPipeline:
         self._publish_status(SAVING)
         yaml_path = self._save_mapping_slam()
 
+        # ── 5b. Stop scan recorder; upgrade map with offline loop closure ─
+        # Flushing the JSONL now gives the complete trajectory to slam_toolbox.
+        # rosie-slam-eval replays it at 5 cm resolution with loop closure ON,
+        # producing a much cleaner map than the 10 cm online output.
+        # Non-fatal: if the upgrade fails the 10 cm online map is used.
+        if scan_recorder.is_recording():
+            scan_recorder.stop()
+            self._publish_scan_log_status()
+        jsonl_path = None
+        st = scan_recorder.get_status()
+        if st.get("path"):
+            p = Path(st["path"])
+            if p.exists() and p.stat().st_size > 1024:
+                jsonl_path = p
+        if jsonl_path is not None:
+            self._publish_status(SAVING, "Refining map (slam_toolbox loop closure)…")
+            try:
+                upgraded = self._run_slam_toolbox_upgrade(jsonl_path, self._map_dir)
+                if upgraded is not None:
+                    yaml_path = upgraded
+                    logger.info("Map upgraded by slam_toolbox: %s", yaml_path)
+            except Exception:
+                logger.exception("slam_toolbox upgrade failed — keeping online map")
+        else:
+            logger.warning("scan log missing or empty — skipping slam_toolbox upgrade")
+
         # ── 6. Process map (clean_map.py) ─────────────────────────────────
         self._publish_status(PROCESSING)
         self._run_clean_map(yaml_path)
@@ -617,6 +643,179 @@ class MapPipeline:
             )
         if res.stdout.strip():
             logger.info("clean_map: %s", res.stdout.strip().splitlines()[-1])
+
+    def _run_slam_toolbox_upgrade(
+        self, jsonl_path: Path, map_dir: Path
+    ) -> Optional[Path]:
+        """Replay scan JSONL through rosie-slam-eval for loop-closed 5 cm map.
+
+        On success, overwrites ``map_dir/home.pgm`` and ``map_dir/home.yaml``
+        with the slam_toolbox output and returns the new yaml path.  On any
+        failure (image missing, container error, no output, timeout) returns
+        None and leaves the existing map files untouched.
+
+        Tunables (env):
+            ROSIE_SLAM_IMAGE   docker image (default rosie-slam-eval:latest)
+            ROSIE_SLAM_SPEED   replay speed multiplier (default "3")
+            ROSIE_SLAM_SETTLE  post-replay settle seconds (default "20")
+            ROSIE_SLAM_TIMEOUT subprocess timeout seconds (default "1500")
+            ROSIE_SLAM_PARAMS  optional path to slam_params.yaml; if set and
+                               readable, mounted into the container so param
+                               edits don't require a Docker rebuild.
+        """
+        import re as _re
+
+        image   = os.environ.get("ROSIE_SLAM_IMAGE",   "rosie-slam-eval:latest")
+        speed   = os.environ.get("ROSIE_SLAM_SPEED",   "3")
+        settle  = os.environ.get("ROSIE_SLAM_SETTLE",  "20")
+        timeout = int(os.environ.get("ROSIE_SLAM_TIMEOUT", "1500"))
+
+        # Default params override: ~/rosie/tools/slam_toolbox_eval/slam_params.yaml
+        params_default = Path.home() / "rosie" / "tools" / "slam_toolbox_eval" / "slam_params.yaml"
+        params_env = os.environ.get("ROSIE_SLAM_PARAMS", "")
+        params_path = Path(params_env) if params_env else params_default
+
+        out_dir = Path("/tmp/rosie_slam_out")
+        try:
+            out_dir.mkdir(exist_ok=True)
+            for f in out_dir.iterdir():
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+        except Exception:
+            logger.exception("could not prepare %s", out_dir)
+            return None
+
+        # Drop kernel page cache before the heavy container to free RAM.
+        try:
+            subprocess.run(["sync"], check=False, timeout=5)
+            subprocess.run(
+                ["sudo", "-n", "tee", "/proc/sys/vm/drop_caches"],
+                input="3\n", text=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False, timeout=5,
+            )
+        except Exception:
+            logger.debug("page-cache drop failed (non-fatal)", exc_info=True)
+
+        cmd = [
+            "docker", "run", "--rm",
+            "--name", "rosie_slam_eval",
+            "--memory", os.environ.get("ROSIE_SLAM_MEM", "300m"),
+            "--memory-swap", os.environ.get("ROSIE_SLAM_SWAP", "1500m"),
+            "-v", f"{jsonl_path}:/data/scan.jsonl:ro",
+            "-v", f"{out_dir}:/out",
+        ]
+        if params_path.is_file():
+            cmd += ["-v", f"{params_path}:/eval/slam_params.yaml:ro"]
+            logger.info("slam_toolbox upgrade: mounting params from %s", params_path)
+        cmd += [
+            "-e", f"ROSIE_REPLAY_SPEED={speed}",
+            "-e", f"ROSIE_REPLAY_SETTLE={settle}",
+            image,
+        ]
+        logger.info("slam_toolbox upgrade: %s", " ".join(cmd))
+        t0 = time.time()
+        stderr_lines: list[str] = []
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except FileNotFoundError:
+            logger.warning("docker CLI not found — skipping slam_toolbox upgrade")
+            return None
+
+        _progress_re = _re.compile(r"replay:\s*(\d+)/(\d+)")
+        _last_publish = 0.0
+
+        try:
+            assert proc.stdout is not None
+            for raw_line in proc.stdout:
+                line = raw_line.rstrip()
+                m = _progress_re.search(line)
+                if m:
+                    done, total = int(m.group(1)), int(m.group(2))
+                    pct = int(100 * done / total) if total else 0
+                    now = time.time()
+                    if now - _last_publish >= 5.0:
+                        self._publish_status(
+                            SAVING,
+                            f"Refining map ({pct}% — {done}/{total} scans)…",
+                        )
+                        _last_publish = now
+            proc.stdout.close()
+
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                logger.error("slam_toolbox upgrade timed out after %ds", timeout)
+                try:
+                    subprocess.run(
+                        ["docker", "rm", "-f", "rosie_slam_eval"],
+                        capture_output=True, timeout=15, check=False,
+                    )
+                except Exception:
+                    pass
+                return None
+
+            assert proc.stderr is not None
+            stderr_lines = proc.stderr.read().splitlines()
+            proc.stderr.close()
+
+        except Exception:
+            logger.exception("slam_toolbox upgrade streaming failed")
+            proc.kill()
+            proc.wait()
+            return None
+
+        elapsed = time.time() - t0
+
+        if proc.returncode != 0:
+            logger.error(
+                "slam_toolbox upgrade failed (rc=%s, %.1fs)\nstderr tail:\n%s",
+                proc.returncode, elapsed,
+                "\n".join(stderr_lines[-15:]),
+            )
+            return None
+
+        src_pgm  = out_dir / "slam_map.pgm"
+        src_yaml = out_dir / "slam_map.yaml"
+        if not (src_pgm.exists() and src_yaml.exists()):
+            logger.error(
+                "slam_toolbox upgrade produced no map (pgm=%s yaml=%s)",
+                src_pgm.exists(), src_yaml.exists(),
+            )
+            return None
+
+        dst_pgm  = map_dir / "home.pgm"
+        dst_yaml = map_dir / "home.yaml"
+        try:
+            map_dir.mkdir(parents=True, exist_ok=True)
+            dst_pgm.write_bytes(src_pgm.read_bytes())
+            # Patch yaml.image to point at home.pgm
+            yaml_text = src_yaml.read_text()
+            patched = []
+            for line in yaml_text.splitlines():
+                if line.startswith("image:"):
+                    patched.append(f"image: {dst_pgm.name}")
+                else:
+                    patched.append(line)
+            dst_yaml.write_text("\n".join(patched) + "\n")
+        except Exception:
+            logger.exception("could not copy slam_toolbox output into map_dir")
+            return None
+
+        logger.info(
+            "slam_toolbox upgrade OK in %.1fs (pgm=%d B)",
+            elapsed, dst_pgm.stat().st_size,
+        )
+        return dst_yaml
 
     # =========================================================================
     # SLAM Toolbox container lifecycle
