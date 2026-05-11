@@ -503,18 +503,28 @@ function Invoke-PiDockerBuild {
     Invoke-Pi $bgCmd -UseKey -AllowFail | Out-Null
     $pollSecs = 30
     $maxPolls = [int]($TimeoutMinutes * 60 / $pollSecs)
+    $startTime = Get-Date
     Write-Host "       Build started on Pi (log: $logFile) -- polling every ${pollSecs}s, up to ${TimeoutMinutes} min..." -ForegroundColor Gray
     for ($p = 1; $p -le $maxPolls; $p++) {
         Start-Sleep -Seconds $pollSecs
         $done = (Invoke-Pi "if [ -f $doneFile ]; then cat $doneFile; else echo WAIT; fi" -UseKey -AllowFail).Output.Trim()
+        $elapsedSec = [int](New-TimeSpan -Start $startTime -End (Get-Date)).TotalSeconds
+        $elapsedFmt = "{0}m {1:D2}s" -f ([int]($elapsedSec / 60)), ($elapsedSec % 60)
         if ($done -ne "WAIT") {
             $exitCode = [int]$done
             $tail = (Invoke-Pi "tail -10 $logFile 2>/dev/null" -UseKey -AllowFail).Output
             Invoke-Pi "rm -f $logFile $doneFile" -UseKey -AllowFail | Out-Null
+            if ($exitCode -eq 0) {
+                Write-Host "       Build completed in $elapsedFmt" -ForegroundColor Green
+                $tail.TrimEnd() -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 5 | ForEach-Object {
+                    Write-Host "         $_" -ForegroundColor DarkGray
+                }
+                $imgSize = (Invoke-Pi "docker image inspect $Tag --format '{{.Size}}' 2>/dev/null | awk '{printf ""%.0f MB"", `$1/1048576}'" -UseKey -AllowFail).Output.Trim()
+                if ($imgSize) { Write-Host "       Image size: $imgSize" -ForegroundColor Gray }
+            }
             return [pscustomobject]@{ ExitCode = $exitCode; Output = $tail }
         }
-        $elapsed = $p * $pollSecs
-        Write-Host "       ...still building ($($elapsed)s elapsed)" -ForegroundColor DarkGray
+        Write-Host "       ...still building ($elapsedFmt elapsed)" -ForegroundColor DarkGray
     }
     $tail = (Invoke-Pi "tail -10 $logFile 2>/dev/null" -UseKey -AllowFail).Output
     return [pscustomobject]@{ ExitCode = 1; Output = "TIMEOUT after ${TimeoutMinutes} min`n$tail" }
