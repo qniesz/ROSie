@@ -290,6 +290,9 @@ $GitTokenSec   = Get-Setting -Cfg $cfg -Key "GitHub_PAT"    -Prompt "GitHub PAT 
 
 if ([string]::IsNullOrWhiteSpace($MqttPort)) { $MqttPort = "1883" }
 
+$RobotName    = Get-Setting -Cfg $cfg -Key "Robot_name"     -Prompt "Robot name         (e.g. ROSie)" -Default "ROSie"
+$MqttPrefix   = ($RobotName.ToLower() -replace '[^a-z0-9]+', '_').Trim('_')
+if ([string]::IsNullOrWhiteSpace($MqttPrefix)) { $MqttPrefix = "rosie" }
 $ManualUpdates = Get-Setting -Cfg $cfg -Key "manual_updates" -Prompt "Disable scheduled auto-updates (true/false)" -Default "false"
 if ([string]::IsNullOrWhiteSpace($ManualUpdates)) { $ManualUpdates = "false" }
 
@@ -497,18 +500,16 @@ try {
     } else {
         $repoUrl = "https://${GitToken}@github.com/qniesz/ROSie.git"
     }
-    $clone = Invoke-Pi "if [ -d ~/rosie/.git ]; then echo ALREADY_CLONED; else GIT_TERMINAL_PROMPT=0 git clone $repoUrl ~/rosie; fi" -UseKey -AllowFail
+    Write-Host "       Removing any existing ~/rosie directory..." -ForegroundColor Gray
+    Invoke-Pi "rm -rf ~/rosie" -UseKey | Out-Null
+    $clone = Invoke-Pi "GIT_TERMINAL_PROMPT=0 git clone $repoUrl ~/rosie" -UseKey -AllowFail
     if ($clone.ExitCode -ne 0) {
         if ($clone.Output -match "could not read Username|Authentication failed") {
             Write-Fail "Repo requires authentication. Add GitHub_PAT to ROSie.conf and re-run.`n  Create a token at: https://github.com/settings/tokens (scope: repo)"
         }
         Write-Fail "git clone failed:`n$($clone.Output)"
     }
-    if ($clone.Output -match "ALREADY_CLONED") {
-        Write-Warn "~/rosie already exists - skipping clone (run 'git pull' manually if needed)"
-    } else {
-        Write-OK
-    }
+    Write-OK
 
     # --- Python venv ----------------------------------------------------------
     Write-Step "Creating Python venv and installing packages"
@@ -532,8 +533,9 @@ try {
         "MQTT_PORT=$MqttPort",
         "MQTT_USER=$MqttUser",
         "MQTT_PASS=$MqttPass",
-        "MQTT_PREFIX=rosie",
+        "MQTT_PREFIX=$MqttPrefix",
         "ROSIE_SERIAL_PORT=/dev/ttyACM0",
+        "ROSIE_NAME=$RobotName",
         "ROSIE_MANUAL_UPDATES=$ManualUpdates"
     )
     # Append board-specific env vars from the board profile's env.example

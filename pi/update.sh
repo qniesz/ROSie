@@ -95,9 +95,14 @@ git -C "$REPO_DIR" fetch origin main 2>/dev/null \
 
 NEW_SHA=$(git -C "$REPO_DIR" rev-parse origin/main)
 
-# ── Already up to date ────────────────────────────────────────────────────────
-if [[ "$PREV_SHA" == "$NEW_SHA" ]]; then
-    _log_result "$(date -Iseconds) OK: already up to date (${PREV_SHA:0:7})"
+# ── Version check — only update when a new stable version is released ─────────
+LOCAL_VER=$(grep '^VERSION' "$REPO_DIR/pi/rosie_driver/_version.py" 2>/dev/null \
+    | head -1 | cut -d'"' -f2 || echo "unknown")
+REMOTE_VER=$(git -C "$REPO_DIR" show origin/main:pi/rosie_driver/_version.py 2>/dev/null \
+    | grep '^VERSION' | head -1 | cut -d'"' -f2 || echo "unknown")
+
+if [[ "$LOCAL_VER" == "$REMOTE_VER" ]]; then
+    _log_result "$(date -Iseconds) OK: already up to date (v${LOCAL_VER})"
     exit 0
 fi
 
@@ -128,7 +133,7 @@ for _i in $(seq 1 60); do
     # `sudo systemctl is-active` fails non-interactively and would cause
     # every update to roll back.
     if systemctl is-active rosie >/dev/null 2>&1; then
-        _log_result "$(date -Iseconds) OK: ${PREV_SHA:0:7} -> ${NEW_SHA:0:7}"
+        _log_result "$(date -Iseconds) OK: v${LOCAL_VER} -> v${REMOTE_VER} (${NEW_SHA:0:7})"
         exit 0
     fi
 done

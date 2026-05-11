@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # check_updates.sh — ROSie daily update availability check
 #
-# Compares local git HEAD against origin/main.
+# Compares VERSION in local _version.py against origin/main:_version.py.
+# Only reports an update when the stable version number changes — unreleased
+# commits that don't bump VERSION are invisible to this check.
 # Publishes ON/OFF to {MQTT_PREFIX}/update_available (retained) so HA can
 # display binary_sensor.rosie_update_available without pulling any code.
 #
@@ -23,10 +25,12 @@ fi
 # Fetch without pulling — silent on network failure (no update info is OK)
 git -C "$REPO_DIR" fetch origin main 2>/dev/null || exit 0
 
-LOCAL=$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null)            || exit 0
-REMOTE=$(git -C "$REPO_DIR" rev-parse origin/main 2>/dev/null)    || exit 0
+LOCAL_VER=$(grep '^VERSION' "$REPO_DIR/pi/rosie_driver/_version.py" 2>/dev/null \
+    | head -1 | cut -d'"' -f2) || exit 0
+REMOTE_VER=$(git -C "$REPO_DIR" show origin/main:pi/rosie_driver/_version.py 2>/dev/null \
+    | grep '^VERSION' | head -1 | cut -d'"' -f2) || exit 0
 
-[[ "$LOCAL" == "$REMOTE" ]] && PAYLOAD="OFF" || PAYLOAD="ON"
+[[ "$LOCAL_VER" == "$REMOTE_VER" ]] && PAYLOAD="OFF" || PAYLOAD="ON"
 
 # Publish if mosquitto_pub is available
 if command -v mosquitto_pub >/dev/null 2>&1 && [[ -n "${MQTT_HOST:-}" ]]; then

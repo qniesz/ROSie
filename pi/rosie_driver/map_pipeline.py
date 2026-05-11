@@ -85,7 +85,6 @@ SCAN_LOG_INTERVAL    = 5     # scan-recorder status cadence (seconds)
 # Helper: HA discovery device block (must match mqtt_bridge.py)
 # ---------------------------------------------------------------------------
 _DEFAULT_DEVICE = {
-    "identifiers": ["rosie_neato_d6"],
     "name": "ROSie",
     "manufacturer": "Neato Robotics",
     "model": "BotVac (detecting...)",
@@ -109,6 +108,7 @@ class MapPipeline:
         # Per-instance device dict (mirrors mqtt_bridge); updated when the
         # driver calls update_device_info() after reading GetVersion.
         self._device = dict(_DEFAULT_DEVICE)
+        self._device["identifiers"] = [f"{self._pfx}_neato_d6"]
 
         # ── Pipeline state ────────────────────────────────────────────────
         self._status = IDLE
@@ -1069,8 +1069,8 @@ class MapPipeline:
         # Remove stale entities from previous driver versions (idempotent —
         # HA ignores empty retained configs for unknown entities).
         stale = [
-            "button/rosie_start_scan_log",
-            "button/rosie_stop_scan_log",
+            f"button/{slug}_start_scan_log",
+            f"button/{slug}_stop_scan_log",
         ]
         # If this device uses a prefix other than "rosie", also wipe the old
         # hardcoded "rosie_" topics that were previously published under this

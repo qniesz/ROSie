@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 # Device block shared by all entities. Model and sw_version are placeholders
 # until update_device_info() is called with real values from GetVersion.
 _DEFAULT_DEVICE = {
-    "identifiers": ["rosie_neato_d6"],
     "name": "ROSie",
     "manufacturer": "Neato Robotics",
     "model": "BotVac (detecting...)",
@@ -64,6 +63,7 @@ class MQTTBridge:
 
         # Per-instance device dict so it can be updated from robot version info
         self._device = dict(_DEFAULT_DEVICE)
+        self._device["identifiers"] = [f"{prefix}_neato_d6"]
         if name:
             self._device["name"] = name
 
@@ -353,7 +353,7 @@ class MQTTBridge:
         config.setdefault("device", self._device)
         config.setdefault("availability", self._availability())
         self._client.publish(
-            f"homeassistant/{component}/rosie_{object_id}/config",
+            f"homeassistant/{component}/{self._prefix}_{object_id}/config",
             json.dumps(config), qos=1, retain=True,
         )
 
@@ -386,8 +386,8 @@ class MQTTBridge:
         # --- Vacuum entity ---
         self._pub_discovery("vacuum", "vacuum", {
             "name": None,
-            "unique_id": "rosie_vacuum_v2",
-            "object_id": "rosie",
+            "unique_id": f"{pfx}_vacuum_v2",
+            "object_id": pfx,
             "command_topic": f"{pfx}/command",
             "payload_start": "start",
             "payload_stop": "stop",
@@ -442,7 +442,7 @@ class MQTTBridge:
             ) else None
             cfg = {
                 "name": label,
-                "unique_id": f"rosie_{btn_id}",
+                "unique_id": f"{pfx}_{btn_id}",
                 "command_topic": f"{pfx}/command",
                 "payload_press": payload,
                 "icon": icon,
@@ -465,7 +465,7 @@ class MQTTBridge:
         for sw_id, label, icon in switches:
             self._pub_discovery("switch", sw_id, {
                 "name": label,
-                "unique_id": f"rosie_{sw_id}",
+                "unique_id": f"{pfx}_{sw_id}",
                 "command_topic": f"{pfx}/settings/{sw_id}/set",
                 "state_topic": f"{pfx}/settings",
                 "value_template": "{{ value_json." + sw_id + " }}",
@@ -482,7 +482,7 @@ class MQTTBridge:
                                ("spot_height", "Spot Clean Height")]:
             self._pub_discovery("number", dim_id, {
                 "name": label,
-                "unique_id": f"rosie_{dim_id}",
+                "unique_id": f"{pfx}_{dim_id}",
                 "command_topic": f"{pfx}/{dim_id}/set",
                 "state_topic": f"{pfx}/spot_config",
                 "value_template": "{{ value_json." + dim_id.split('_')[1] + " }}",
@@ -497,7 +497,7 @@ class MQTTBridge:
         # --- Switch: Vacuum motor direct control ---
         self._pub_discovery("switch", "vacuum_motor", {
             "name": "Vacuum Motor",
-            "unique_id": "rosie_vacuum_motor",
+            "unique_id": f"{pfx}_vacuum_motor",
             "command_topic": f"{pfx}/vacuum_motor/set",
             "state_topic": f"{pfx}/vacuum_state",
             "value_template": "{{ value_json.vacuum_on }}",
@@ -511,7 +511,7 @@ class MQTTBridge:
         # --- Number: Vacuum speed ---
         self._pub_discovery("number", "vacuum_speed", {
             "name": "Vacuum Speed",
-            "unique_id": "rosie_vacuum_speed",
+            "unique_id": f"{pfx}_vacuum_speed",
             "command_topic": f"{pfx}/vacuum_speed/set",
             "state_topic": f"{pfx}/vacuum_state",
             "value_template": "{{ value_json.vacuum_speed }}",
@@ -526,7 +526,7 @@ class MQTTBridge:
         # --- Select: Navigation mode ---
         self._pub_discovery("select", "nav_mode", {
             "name": "Navigation Mode",
-            "unique_id": "rosie_nav_mode",
+            "unique_id": f"{pfx}_nav_mode",
             "command_topic": f"{pfx}/nav_mode/set",
             "state_topic": f"{pfx}/settings",
             "value_template": "{{ value_json.nav_mode }}",
@@ -565,7 +565,7 @@ class MQTTBridge:
         for s_id, label, unit, dev_class, topic, tmpl, state_class in sensors:
             cfg = {
                 "name": label,
-                "unique_id": f"rosie_{s_id}",
+                "unique_id": f"{pfx}_{s_id}",
                 "state_topic": topic,
                 "value_template": tmpl,
             }
@@ -593,7 +593,7 @@ class MQTTBridge:
         for bs_id, label, dev_class, topic, tmpl in bin_sensors:
             self._pub_discovery("binary_sensor", bs_id, {
                 "name": label,
-                "unique_id": f"rosie_{bs_id}",
+                "unique_id": f"{pfx}_{bs_id}",
                 "state_topic": topic,
                 "value_template": tmpl,
                 "payload_on": "ON",
@@ -615,7 +615,7 @@ class MQTTBridge:
         for bs_id, label, topic, tmpl in bumper_sensors:
             self._pub_discovery("binary_sensor", bs_id, {
                 "name": label,
-                "unique_id": f"rosie_{bs_id}",
+                "unique_id": f"{pfx}_{bs_id}",
                 "state_topic": topic,
                 "value_template": tmpl,
                 "payload_on": "ON",
