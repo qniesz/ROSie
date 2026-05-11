@@ -23,11 +23,20 @@ echo "=== rosie online slam_toolbox ==="
 date
 free -m
 
-# Force single-threaded BLAS — saves ~30 MB on Pi Zero 2 W
-export OMP_NUM_THREADS=1
-export OPENBLAS_NUM_THREADS=1
-export MKL_NUM_THREADS=1
-export EIGEN_DONT_PARALLELIZE=1
+# Thread count: Orange Pi Zero 2W (Armbian, 1.5 GB) gets all 4 cores;
+# Raspberry Pi Zero 2W (416 MB) is constrained to 1 to save ~30 MB RAM.
+# Can be overridden via ROSIE_SLAM_OMP_THREADS env var.
+_board=$(cat /proc/device-tree/model 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo "unknown")
+if echo "$_board" | grep -q "orange"; then
+    _default_threads=4
+else
+    _default_threads=1
+fi
+_threads=${ROSIE_SLAM_OMP_THREADS:-$_default_threads}
+export OMP_NUM_THREADS=$_threads
+export OPENBLAS_NUM_THREADS=$_threads
+export MKL_NUM_THREADS=$_threads
+unset EIGEN_DONT_PARALLELIZE  # let Eigen follow OMP_NUM_THREADS
 
 # CycloneDDS — loopback only, no multicast, unicast peer on 127.0.0.1.
 # The image's /cfg/cyclonedds_no_shm.xml uses autodetermine="true" which

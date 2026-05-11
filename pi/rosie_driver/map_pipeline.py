@@ -82,6 +82,43 @@ SCAN_LOG_INTERVAL    = 5     # scan-recorder status cadence (seconds)
 
 
 # ---------------------------------------------------------------------------
+# Board-aware resource limits for Docker containers
+# ---------------------------------------------------------------------------
+def _slam_resources() -> dict:
+    """Return Docker memory limits and thread counts for this board.
+
+    Orange Pi Zero 2W (Armbian, ~1.5 GB visible): high limits, all 4 cores.
+    Raspberry Pi Zero 2W (~416 MB visible): conservative limits, 1 thread.
+    Unknown boards fall back to the Raspberry Pi safe defaults.
+
+    All values can be overridden via environment variables.
+    """
+    try:
+        from .gpio_pins import detect_board_profile
+        profile = detect_board_profile()
+    except Exception:
+        profile = "unknown"
+
+    is_orangepi = "orange" in profile
+
+    if is_orangepi:
+        return {
+            "online_mem":   os.environ.get("ROSIE_SLAM_ONLINE_MEM",  "700m"),
+            "eval_mem":     os.environ.get("ROSIE_SLAM_MEM",         "900m"),
+            "swap":         os.environ.get("ROSIE_SLAM_SWAP",        "1500m"),
+            "omp_threads":  os.environ.get("ROSIE_SLAM_OMP_THREADS", "4"),
+        }
+    else:
+        # Raspberry Pi Zero 2W defaults (safe for 416 MB)
+        return {
+            "online_mem":   os.environ.get("ROSIE_SLAM_ONLINE_MEM",  "280m"),
+            "eval_mem":     os.environ.get("ROSIE_SLAM_MEM",         "280m"),
+            "swap":         os.environ.get("ROSIE_SLAM_SWAP",        "1500m"),
+            "omp_threads":  os.environ.get("ROSIE_SLAM_OMP_THREADS", "1"),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Helper: HA discovery device block (must match mqtt_bridge.py)
 # ---------------------------------------------------------------------------
 _DEFAULT_DEVICE = {
@@ -666,7 +703,7 @@ class MapPipeline:
         import re as _re
 
         image   = os.environ.get("ROSIE_SLAM_IMAGE",   "rosie-slam-eval:latest")
-        speed   = os.environ.get("ROSIE_SLAM_SPEED",   "3")
+        speed   = os.environ.get("ROSIE_SLAM_SPEED",   "5")
         settle  = os.environ.get("ROSIE_SLAM_SETTLE",  "20")
         timeout = int(os.environ.get("ROSIE_SLAM_TIMEOUT", "1500"))
 
@@ -699,11 +736,13 @@ class MapPipeline:
         except Exception:
             logger.debug("page-cache drop failed (non-fatal)", exc_info=True)
 
+        res = _slam_resources()
+        logger.info("slam_toolbox upgrade: board resources: %s", res)
         cmd = [
             "docker", "run", "--rm",
             "--name", "rosie_slam_eval",
-            "--memory", os.environ.get("ROSIE_SLAM_MEM", "300m"),
-            "--memory-swap", os.environ.get("ROSIE_SLAM_SWAP", "1500m"),
+            "--memory", res["eval_mem"],
+            "--memory-swap", res["swap"],
             "-v", f"{jsonl_path}:/data/scan.jsonl:ro",
             "-v", f"{out_dir}:/out",
         ]
@@ -713,6 +752,9 @@ class MapPipeline:
         cmd += [
             "-e", f"ROSIE_REPLAY_SPEED={speed}",
             "-e", f"ROSIE_REPLAY_SETTLE={settle}",
+            "-e", f"OMP_NUM_THREADS={res['omp_threads']}",
+            "-e", f"OPENBLAS_NUM_THREADS={res['omp_threads']}",
+            "-e", f"MKL_NUM_THREADS={res['omp_threads']}",
             image,
         ]
         logger.info("slam_toolbox upgrade: %s", " ".join(cmd))
@@ -867,12 +909,15 @@ class MapPipeline:
             except Exception:
                 pass
 
+            _res = _slam_resources()
+            logger.info("slam_online start (ensure): board resources: %s", _res)
             subprocess.Popen(
                 [
                     "docker", "run", "-d", "--rm",
                     "--name", self._SLAM_CONTAINER,
                     "--network", "host",
-                    "--memory", "300m", "--memory-swap", "1500m",
+                    "--memory", _res["online_mem"],
+                    "--memory-swap", _res["swap"],
                     "-v", f"{self._SLAM_MAPS_HOST}:/slam_maps",
                     "-v", f"{self._SLAM_OUT_HOST}:/out",
                     "--env-file", str(self._ENV_FILE),
@@ -935,13 +980,15 @@ class MapPipeline:
         except Exception:
             pass
 
-        logger.info("Starting slam_online container in MAPPING mode")
+        _res = _slam_resources()
+        logger.info("slam_online start (mapping): board resources: %s", _res)
         subprocess.run(
             [
                 "docker", "run", "-d", "--rm",
                 "--name", self._SLAM_CONTAINER,
                 "--network", "host",
-                "--memory", "300m", "--memory-swap", "1500m",
+                "--memory", _res["online_mem"],
+                "--memory-swap", _res["swap"],
                 "-v", f"{self._SLAM_MAPS_HOST}:/slam_maps",
                 "-v", f"{self._SLAM_OUT_HOST}:/out",
                 "--env-file", str(self._ENV_FILE),
