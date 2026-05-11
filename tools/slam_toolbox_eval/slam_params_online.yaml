@@ -29,7 +29,7 @@ slam_toolbox:
 
     use_scan_matching: true
     use_scan_barycenter: true
-    minimum_travel_distance: 0.20      # raised: low value causes over-correction on featureless straight walls
+    minimum_travel_distance: 0.10      # lowered from 0.20: more frequent scan corrections reduce drift accumulation
     minimum_travel_heading: 0.15
 
     scan_buffer_size: 10                     # restored to 10; larger values add pressure on CorrelationGrid during startup crash window
@@ -40,17 +40,14 @@ slam_toolbox:
     correlation_search_space_resolution: 0.05
     correlation_search_space_smear_deviation: 0.10
 
-    # ── Loop closure DISABLED for online use ─────────────────────────────────
-    # Enabling loop closure online with large search dimensions
-    # (loop_search_space_dimension >= 6.0) causes slam_toolbox to crash with
-    # "unable to get pointer in probability search" when the search window
-    # extends beyond the partially-built map.  The sync node hits this harder
-    # than async because there is no queue buffer to absorb the delay.
-    # The offline slam_toolbox upgrade (rosie-slam-eval, run after the clean
-    # cycle) handles loop closure on the complete trajectory with the full map
-    # present — no risk of out-of-bounds search.
-    # The primary multi-room fix is sync_slam_toolbox_node (no stale-odom queue).
-    do_loop_closing: false
+    # ── Loop closure ENABLED for online use ──────────────────────────────────
+    # Crashes seen previously were at loop_search_space_dimension >= 6.0 m;
+    # the current 4.0 m value keeps the search window safely within the
+    # partial map.  async_slam_toolbox_node (used by run_online.sh) handles
+    # queued scans gracefully so loop closure processing doesn't block scans.
+    # High response thresholds (coarse=0.50, fine=0.60) and chain=15 reduce
+    # false-positive loop closures on featureless corridors.
+    do_loop_closing: true
     loop_search_space_dimension: 4.0
     loop_search_space_resolution: 0.05
     loop_search_space_smear_deviation: 0.03

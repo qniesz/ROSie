@@ -835,6 +835,11 @@ class MapPipeline:
         Called by main.py before each cleaning cycle so the robot always has
         a live SLAM pose during normal operation.  Skipped when a mapping
         pipeline is already running (MAPPING / WAITING_FOR_DOCK states).
+
+        If the container had to be started, blocks until lifecycle_activate.py
+        writes "active" to lifecycle_status.txt (up to 120 s).  This ensures
+        slam_toolbox has seeded the initial pose at the dock (0,0,0) BEFORE
+        the robot starts moving, preventing wrong-room localization.
         """
         if self._status in (MAPPING, WAITING_FOR_DOCK):
             return
@@ -849,10 +854,19 @@ class MapPipeline:
                 capture_output=True, text=True, timeout=10, check=False,
             )
             if self._SLAM_CONTAINER in res.stdout:
-                return   # already running
+                return   # already running and (presumably) active
             logger.info("slam_online container not running — starting it")
             self._SLAM_MAPS_HOST.mkdir(parents=True, exist_ok=True)
             self._SLAM_OUT_HOST.mkdir(parents=True, exist_ok=True)
+
+            # Clear stale lifecycle status from a previous run so we don't
+            # mistake an old "active" for a fresh activation.
+            status_file = self._SLAM_OUT_HOST / "lifecycle_status.txt"
+            try:
+                status_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+
             subprocess.Popen(
                 [
                     "docker", "run", "-d", "--rm",
@@ -865,6 +879,25 @@ class MapPipeline:
                     self._SLAM_IMAGE,
                 ],
             )
+
+            # Wait for lifecycle_activate.py to confirm slam_toolbox is active
+            # and has seeded the initial pose at the dock before the robot moves.
+            logger.info("Waiting for slam_online lifecycle to become active (up to 120 s)…")
+            deadline = time.time() + 120
+            while time.time() < deadline:
+                try:
+                    txt = status_file.read_text().strip().lower()
+                    if txt == "active":
+                        logger.info("slam_online lifecycle is active — proceeding with clean")
+                        return
+                    if txt.startswith("failed"):
+                        logger.warning("slam_online lifecycle failed: %s", txt)
+                        return
+                except FileNotFoundError:
+                    pass
+                time.sleep(2)
+            logger.warning("slam_online did not become active within 120 s — proceeding anyway")
+
         except Exception:
             logger.warning("ensure_online_slam failed", exc_info=True)
 

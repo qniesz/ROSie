@@ -18,7 +18,7 @@ import serial
 logger = logging.getLogger(__name__)
 
 # Neato D6 physical constants
-BASE_WIDTH_MM = 245       # wheel-to-wheel distance in mm
+BASE_WIDTH_MM = 241       # wheel-to-wheel distance in mm (measured center-to-center: 9.5 in = 241.3 mm)
 MAX_SPEED_MM_S = 300      # max motor speed in mm/s
 LIDAR_POINTS = 360        # number of LIDAR scan points per revolution
 

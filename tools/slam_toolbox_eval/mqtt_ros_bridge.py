@@ -110,7 +110,7 @@ class BridgeNode(Node):
         st.header.stamp = self.get_clock().now().to_msg()
         st.header.frame_id = "base_link"
         st.child_frame_id = "laser_link"
-        st.transform.translation.x = -0.165  # 165 mm aft (back-centre of 13 in robot)
+        st.transform.translation.x = -0.100  # 100 mm aft (measured: axle centre to LDS turret centre)
         st.transform.rotation.w = 1.0
         self.static_br.sendTransform(st)
 
@@ -330,21 +330,23 @@ class BridgeNode(Node):
             rgb = np.flipud(rgb)
 
             img = PILImage.fromarray(rgb, "RGB")
-            img = img.resize((w * 2, h * 2), PILImage.NEAREST)
+            # Scale up so the longer dimension is at least 400 px — keeps the
+            # image sharp in HA without the card having to stretch tiny pixels.
+            scale = max(4, 400 // max(w, h, 1))
+            img = img.resize((w * scale, h * scale), PILImage.NEAREST)
             draw = PILImageDraw.Draw(img)
 
-            scale = 2
             def world_to_px(wx: float, wy: float):
-                """Map-frame metres → pixel coords in the 2× upscaled image."""
+                """Map-frame metres → pixel coords in the upscaled image."""
                 col = int((wx - ox) / res) * scale
                 row = int((h - 1 - (wy - oy) / res)) * scale
                 return col, row
 
             # Dock marker at map origin (robot starts at dock = (0,0) in map frame).
             dx, dy = world_to_px(0.0, 0.0)
-            r = 8
+            r = max(6, scale * 3)
             draw.ellipse([dx - r, dy - r, dx + r, dy + r],
-                         fill=(34, 170, 85), outline=(20, 120, 60), width=2)
+                         fill=(34, 170, 85), outline=(20, 120, 60), width=max(1, scale // 2))
 
             # Robot marker from latest map→base_link TF.
             try:
@@ -356,9 +358,9 @@ class BridgeNode(Node):
                 q  = tf_.transform.rotation
                 rth = yaw_from_quat(q.x, q.y, q.z, q.w)
                 px, py = world_to_px(rx, ry)
-                r = 7
+                r = max(5, scale * 2)
                 draw.ellipse([px - r, py - r, px + r, py + r],
-                             fill=(41, 121, 255), outline=(20, 70, 200), width=2)
+                             fill=(41, 121, 255), outline=(20, 70, 200), width=max(1, scale // 2))
                 tip = r * 1.8
                 tx = px + tip * math.cos(rth)
                 ty = py - tip * math.sin(rth)
@@ -370,14 +372,21 @@ class BridgeNode(Node):
             except (LookupException, ConnectivityException, ExtrapolationException):
                 pass
 
-            # Watermark.
+            # Small corner label — doesn't obscure the map.
             try:
                 font = PILImageFont.truetype(
-                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
             except (OSError, IOError):
                 font = PILImageFont.load_default()
-            draw.text((10, 10), "LIVE \u2014 SLAM Toolbox mapping",
-                      fill=(220, 60, 60), font=font)
+            label = "MAPPING"
+            bb = draw.textbbox((0, 0), label, font=font)
+            lw, lh = bb[2] - bb[0], bb[3] - bb[1]
+            pad = 4
+            x0 = img.width - lw - pad * 2 - 2
+            y0 = 2
+            draw.rectangle([x0, y0, x0 + lw + pad * 2, y0 + lh + pad * 2],
+                           fill=(0, 0, 0, 160))
+            draw.text((x0 + pad, y0 + pad), label, fill=(255, 200, 50), font=font)
 
             buf = _io.BytesIO()
             img.save(buf, "JPEG", quality=70, optimize=True)
