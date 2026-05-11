@@ -68,7 +68,7 @@ class MQTTBridge:
             self._device["name"] = name
 
         self._client = mqtt.Client(
-            client_id="rosie-pi-driver",
+            client_id=f"{prefix}-pi-driver",
             protocol=mqtt.MQTTv311,
         )
 

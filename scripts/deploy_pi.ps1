@@ -630,7 +630,10 @@ try {
         "rosie-check-updates.timer"
     )
     foreach ($unit in $units) {
-        Invoke-PiSudo "cp /home/$script:PiUser/rosie/pi/systemd/$unit /etc/systemd/system/$unit" | Out-Null
+        $localUnit = Join-Path $PSScriptRoot "..\pi\systemd\$unit"
+        Copy-ToPi -LocalPath $localUnit -RemotePath "/tmp/$unit" -UseKey
+        Invoke-PiSudo "mv /tmp/$unit /etc/systemd/system/$unit" | Out-Null
+        Invoke-PiSudo "chmod 644 /etc/systemd/system/$unit" | Out-Null
     }
     Invoke-PiSudo "systemctl daemon-reload" | Out-Null
     Invoke-PiSudo "systemctl enable rosie.service rosie-update.timer rosie-check-updates.timer" | Out-Null
