@@ -318,6 +318,24 @@ if (-not (Get-Command scp.exe -ErrorAction SilentlyContinue)) {
 }
 Write-OK
 
+# --- Network reachability check ----------------------------------------------
+Write-Step "Checking Pi is reachable at $script:PiHost port 22"
+try {
+    $tcp = [System.Net.Sockets.TcpClient]::new()
+    $connect = $tcp.BeginConnect($script:PiHost, 22, $null, $null)
+    $waited  = $connect.AsyncWaitHandle.WaitOne(5000, $false)
+    if ($waited -and $tcp.Connected) {
+        $tcp.EndConnect($connect)
+        $tcp.Close()
+        Write-OK
+    } else {
+        $tcp.Close()
+        Write-Fail "Cannot reach $script:PiHost on port 22 (timed out).`n       Check that the Pi is powered on, connected to the network, and the IP address in ROSie.conf is correct."
+    }
+} catch {
+    Write-Fail "Cannot reach $script:PiHost on port 22: $_`n       Check that the Pi is powered on, connected to the network, and the IP address in ROSie.conf is correct."
+}
+
 # --- Clear any stale host key in the personal known_hosts --------------------
 # If the Pi was reflashed, the user's main known_hosts file may still have an
 # old entry. We clean both our dedicated file and the default one so ssh.exe
@@ -394,6 +412,25 @@ if ($whoami.ExitCode -ne 0 -or $whoami.Output.Trim() -ne $script:PiUser) {
     Write-Fail "Key-based SSH not working. Got: $($whoami.Output)"
 }
 Write-OK
+
+# --- Check for existing installation and ask about full wipe ----------------
+$script:ForceWipe = $false
+$existCheck = Invoke-Pi "test -e ~/rosie && echo EXISTS || echo NONE" -UseKey -AllowFail
+if ($existCheck.Output.Trim() -eq "EXISTS") {
+    Write-Host ""
+    Write-Host "  ~/rosie already exists on the Pi." -ForegroundColor Yellow
+    Write-Host "  A full wipe will delete ~/rosie and re-clone from GitHub." -ForegroundColor Yellow
+    Write-Host "  Answer 'n' to keep the existing files (only env/systemd will be updated)." -ForegroundColor DarkGray
+    Write-Host ""
+    $wipeAnswer = Read-Host "  Full wipe and re-clone? (y/N)"
+    if ($wipeAnswer.Trim().ToLower() -eq "y") {
+        $script:ForceWipe = $true
+        Write-Host "       Full wipe selected." -ForegroundColor Yellow
+    } else {
+        Write-Host "       Keeping existing files." -ForegroundColor Gray
+    }
+    Write-Host ""
+}
 
 try {
 
@@ -500,14 +537,21 @@ try {
     } else {
         $repoUrl = "https://${GitToken}@github.com/qniesz/ROSie.git"
     }
-    Write-Host "       Removing any existing ~/rosie directory..." -ForegroundColor Gray
-    Invoke-Pi "rm -rf ~/rosie" -UseKey | Out-Null
-    $clone = Invoke-Pi "GIT_TERMINAL_PROMPT=0 git clone $repoUrl ~/rosie" -UseKey -AllowFail
-    if ($clone.ExitCode -ne 0) {
-        if ($clone.Output -match "could not read Username|Authentication failed") {
-            Write-Fail "Repo requires authentication. Add GitHub_PAT to ROSie.conf and re-run.`n  Create a token at: https://github.com/settings/tokens (scope: repo)"
+    if ($script:ForceWipe) {
+        Write-Host "       Removing existing ~/rosie directory..." -ForegroundColor Gray
+        Invoke-Pi "rm -rf ~/rosie" -UseKey | Out-Null
+    }
+    $cloneNeeded = (Invoke-Pi "test -d ~/rosie/.git && echo EXISTS || echo NONE" -UseKey -AllowFail).Output.Trim() -eq "NONE"
+    if ($cloneNeeded) {
+        $clone = Invoke-Pi "GIT_TERMINAL_PROMPT=0 git clone $repoUrl ~/rosie" -UseKey -AllowFail
+        if ($clone.ExitCode -ne 0) {
+            if ($clone.Output -match "could not read Username|Authentication failed") {
+                Write-Fail "Repo requires authentication. Add GitHub_PAT to ROSie.conf and re-run.`n  Create a token at: https://github.com/settings/tokens (scope: repo)"
+            }
+            Write-Fail "git clone failed:`n$($clone.Output)"
         }
-        Write-Fail "git clone failed:`n$($clone.Output)"
+    } else {
+        Write-Host "       ~/rosie already present - skipping clone." -ForegroundColor Gray
     }
     Write-OK
 
