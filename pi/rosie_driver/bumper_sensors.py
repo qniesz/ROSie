@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 try:
     import RPi.GPIO as GPIO  # type: ignore[import-not-found]
-except ImportError:
+except (ImportError, RuntimeError):
     GPIO = None
 
 logger = logging.getLogger(__name__)
