@@ -59,6 +59,12 @@ _virtual_timers: dict[str, threading.Timer | None] = {ch: None for ch in BUMPER_
 # Set True while test_pin() is driving a pin LOW — suppresses stop callback
 _test_active: bool = False
 
+# Pose provider: called on bump to snapshot robot position
+_pose_provider: Optional[Callable[[], tuple]] = None
+
+# Bump event callback: called on every new bump trigger
+_bump_event_callback: Optional[Callable] = None
+
 
 def _env_flag(name: str, default: bool = True) -> bool:
     value = os.getenv(name)
@@ -309,6 +315,37 @@ def test_pin(key: str, hold_secs: float = 5.0) -> None:
             logger.info("[bumper_sensors] test_pin(%s) %s → INPUT/floating", key, _backend.pin_display(key))
 
     threading.Thread(target=_drive, name=f"test_pin_{key}", daemon=True).start()
+
+
+def set_pose_provider(fn: Optional[Callable[[], tuple]]) -> None:
+    """Register a function that returns the current robot pose tuple."""
+    global _pose_provider
+    _pose_provider = fn
+
+
+def set_bump_event_callback(fn: Optional[Callable]) -> None:
+    """Register a callback invoked on each new bump trigger.
+
+    Signature: fn(side, is_front, virtual, pose)
+    """
+    global _bump_event_callback
+    _bump_event_callback = fn
+
+
+def _emit_bump_event(side: str, is_front: bool, virtual: bool) -> None:
+    """Snapshot pose and fire the bump event callback if registered."""
+    if _bump_event_callback is None:
+        return
+    pose = None
+    if _pose_provider is not None:
+        try:
+            pose = _pose_provider()
+        except Exception:
+            pass
+    try:
+        _bump_event_callback(side, is_front, virtual, pose)
+    except Exception as exc:
+        logger.error("[bumper_sensors] bump event callback error: %s", exc)
 
 
 # ---------------------------------------------------------------------------
