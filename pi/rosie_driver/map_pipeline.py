@@ -1295,14 +1295,18 @@ class MapPipeline:
 
     def _pub_discovery(self, component: str, object_id: str, config: dict) -> None:
         pfx = self._pfx
+        slug = pfx  # e.g. "rosie" or "rosie_2" — already a safe MQTT slug
         config.setdefault("device", self._device)
         config.setdefault("availability", [{
             "topic": f"{pfx}/availability",
             "payload_available": "online",
             "payload_not_available": "offline",
         }])
+        # Always derive unique_id and topic slug from the device prefix so
+        # multiple robots (ROSie, ROSie 2, …) each get their own HA entities.
+        config["unique_id"] = f"{slug}_{object_id}"
         self._mqtt._client.publish(
-            f"homeassistant/{component}/rosie_{object_id}/config",
+            f"homeassistant/{component}/{slug}_{object_id}/config",
             json.dumps(config), qos=1, retain=True,
         )
 
@@ -1324,11 +1328,26 @@ class MapPipeline:
 
     def _publish_ha_discovery(self) -> None:
         pfx = self._pfx
+        slug = pfx
 
         # Remove stale entities from previous driver versions (idempotent —
         # HA ignores empty retained configs for unknown entities).
-        for _stale in ("button/rosie_start_scan_log",
-                       "button/rosie_stop_scan_log"):
+        stale = [
+            "button/rosie_start_scan_log",
+            "button/rosie_stop_scan_log",
+        ]
+        # If this device uses a prefix other than "rosie", also wipe the old
+        # hardcoded "rosie_" topics that were previously published under this
+        # device's MQTT connection (e.g. ROSie 2 previously polluted
+        # homeassistant/button/rosie_reboot/config with its device info).
+        if slug != "rosie":
+            for _obj in ("create_map", "reboot", "scan_log",
+                         "map_pipeline_status", "map", "map_meta",
+                         "cpu_load", "ram", "update_software",
+                         "last_update", "version", "update_available"):
+                stale.append(f"sensor/rosie_{_obj}")
+                stale.append(f"button/rosie_{_obj}")
+        for _stale in stale:
             self._mqtt._client.publish(
                 f"homeassistant/{_stale}/config", "", qos=1, retain=True,
             )
