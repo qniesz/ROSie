@@ -634,7 +634,7 @@ try {
     }
     Invoke-PiSudo "systemctl daemon-reload" | Out-Null
     Invoke-PiSudo "systemctl enable rosie.service rosie-update.timer rosie-check-updates.timer" | Out-Null
-    Invoke-PiSudo "systemctl start rosie.service" -AllowFail | Out-Null
+    Invoke-PiSudo "systemctl restart rosie.service" -AllowFail | Out-Null
     Write-OK
 
     # --- Unattended OS security updates ---------------------------------------

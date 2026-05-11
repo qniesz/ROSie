@@ -13,7 +13,8 @@ ExecStart=/home/rosie/rosie-venv/bin/python3 -m rosie_driver \
     --mqtt-host ${MQTT_HOST} \
     --mqtt-port ${MQTT_PORT} \
     --mqtt-user ${MQTT_USER} \
-    --mqtt-pass ${MQTT_PASS}
+    --mqtt-pass ${MQTT_PASS} \
+    --robot-name ${ROSIE_NAME}
 
 EnvironmentFile=/home/rosie/rosie-driver.env
 
