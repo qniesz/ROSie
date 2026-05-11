@@ -56,6 +56,7 @@ class MQTTBridge:
         username: Optional[str] = None,
         password: Optional[str] = None,
         prefix: str = "rosie",
+        name: Optional[str] = None,
     ):
         self._host = host
         self._port = port
@@ -63,6 +64,8 @@ class MQTTBridge:
 
         # Per-instance device dict so it can be updated from robot version info
         self._device = dict(_DEFAULT_DEVICE)
+        if name:
+            self._device["name"] = name
 
         self._client = mqtt.Client(
             client_id="rosie-pi-driver",
@@ -90,6 +93,8 @@ class MQTTBridge:
         self._nogo_lines_callback: Optional[
             Callable[[list], tuple[bool, str, list[dict[str, list[float]]]]]
         ] = None
+        self._nogo_tuning_callback: Optional[Callable[[str, float], None]] = None
+        self._slam_pose_callback: Optional[Callable[[float, float, float], None]] = None
 
         # Latest SLAM-corrected pose from ROS 2 (map frame)
         self._slam_pose: Optional[tuple] = None  # (x, y, theta) or None
@@ -127,6 +132,27 @@ class MQTTBridge:
         cb: Callable[[list], tuple[bool, str, list[dict[str, list[float]]]]],
     ) -> None:
         self._nogo_lines_callback = cb
+
+    def set_nogo_tuning_callback(
+        self,
+        cb: Callable[[str, float], None],
+    ) -> None:
+        self._nogo_tuning_callback = cb
+
+    def set_slam_pose_callback(
+        self,
+        cb: Callable[[float, float, float], None],
+    ) -> None:
+        self._slam_pose_callback = cb
+
+    def publish_nogo_tuning(self, tuning: dict) -> None:
+        self.publish("nogo_tuning", tuning, retain=True)
+
+    def publish_nogo_debug(self, snapshot: dict) -> None:
+        self.publish("nogo_debug", snapshot, retain=False)
+
+    def publish_bumper_event(self, record: dict) -> None:
+        self.publish("bumper_event", record, retain=False)
 
     def get_slam_pose(self) -> Optional[tuple]:
         """Return latest SLAM pose (x, y, theta) or None if not yet available."""
@@ -387,11 +413,6 @@ class MQTTBridge:
             ("resume_cleaning", "Resume Cleaning", "mdi:play"),
             ("send_to_base", "Send to Base", "mdi:home-import-outline"),
             ("locate", "Locate Robot", "mdi:volume-high"),
-            # Manual driving
-            ("manual_turn_left_down", "Turn Left", "mdi:arrow-left-bold"),
-            ("manual_turn_left_up", "Turn Left Stop", "mdi:arrow-left"),
-            ("manual_turn_right_down", "Turn Right", "mdi:arrow-right-bold"),
-            ("manual_turn_right_up", "Turn Right Stop", "mdi:arrow-right"),
             ("start_manual_cleaning", "Start Manual Cleaning", "mdi:play-circle"),
             # Utility
             ("update_status", "Update Status", "mdi:refresh"),
@@ -628,6 +649,7 @@ class MQTTBridge:
                 (f"{pfx}/vacuum_motor/set", 1),
                 (f"{pfx}/vacuum_speed/set", 1),
                 (f"{pfx}/nogo_lines/set", 1),
+                (f"{pfx}/nogo_tuning/set", 1),
             ]
             for topic, qos in subs:
                 client.subscribe(topic, qos=qos)
@@ -667,12 +689,13 @@ class MQTTBridge:
         elif topic == f"{pfx}/pose":
             try:
                 data = json.loads(payload)
+                sx = float(data['x'])
+                sy = float(data['y'])
+                sth = float(data['theta'])
                 with self._slam_lock:
-                    self._slam_pose = (
-                        float(data['x']),
-                        float(data['y']),
-                        float(data['theta']),
-                    )
+                    self._slam_pose = (sx, sy, sth)
+                if self._slam_pose_callback:
+                    self._slam_pose_callback(sx, sy, sth)
             except (json.JSONDecodeError, ValueError, KeyError) as exc:
                 logger.warning("Invalid pose payload: %s — %s", payload, exc)
 
@@ -755,3 +778,14 @@ class MQTTBridge:
                     self.publish_nogo_status("error", msg)
             except (json.JSONDecodeError, ValueError, TypeError) as exc:
                 self.publish_nogo_status("error", f"invalid no-go payload: {exc}")
+
+        # --- No-go tuning number updates ---
+        elif topic == f"{pfx}/nogo_tuning/set":
+            if self._nogo_tuning_callback is None:
+                return
+            try:
+                data = json.loads(payload)
+                for key, value in data.items():
+                    self._nogo_tuning_callback(key, float(value))
+            except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                logger.warning("Invalid nogo_tuning payload: %s — %s", payload, exc)
