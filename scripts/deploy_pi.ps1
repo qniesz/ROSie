@@ -579,7 +579,7 @@ try {
         "MQTT_PASS=$MqttPass",
         "MQTT_PREFIX=$MqttPrefix",
         "ROSIE_SERIAL_PORT=/dev/ttyACM0",
-        "ROSIE_NAME=$RobotName",
+        "ROSIE_NAME=`"$RobotName`"",
         "ROSIE_MANUAL_UPDATES=$ManualUpdates"
     )
     # Append board-specific env vars from the board profile's env.example
