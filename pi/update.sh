@@ -85,7 +85,7 @@ if [[ "$FORCE" -eq 0 ]]; then
 fi
 
 # ── Network check ──────────────────────────────────────────────────────────────
-if ! ping -c 1 -W 5 github.com >/dev/null 2>&1; then
+if ! curl -sf --max-time 5 --head https://github.com >/dev/null 2>&1; then
     _fail "no network — cannot reach github.com"
 fi
 
