@@ -1095,7 +1095,14 @@ def main() -> None:
             scan_active = lds_active or robot_cleaning
 
             if scan_active:
-                _tick_nogo_pulses(now)
+                # Suppress no-go guard during create_map pipeline — the robot is
+                # doing a full-home clean and must not be diverted by stale map lines.
+                _pipeline_mapping = (
+                    pipeline is not None
+                    and pipeline._status in ("mapping", "waiting_for_dock")
+                )
+                if not _pipeline_mapping:
+                    _tick_nogo_pulses(now)
             elif any(st["touching"] for st in nogo_seq.values()):
                 logger.info("[main] no-go pulse reset (scan inactive)")
                 for side in ("left", "right"):

@@ -11,8 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-jazzy-rmw-cyclonedds-cpp \
         ros-jazzy-tf2-ros-py \
         ros-jazzy-foxglove-bridge \
-  ros-jazzy-robot-state-publisher \
+        ros-jazzy-robot-state-publisher \
         python3-paho-mqtt \
+        python3-pil \
     && rm -rf /var/lib/apt/lists/*
 
 # CycloneDDS no-SHM config: disable shared memory and multicast so the

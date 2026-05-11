@@ -32,11 +32,11 @@ slam_toolbox:
     minimum_travel_distance: 0.20      # raised: low value causes over-correction on featureless straight walls
     minimum_travel_heading: 0.15
 
-    scan_buffer_size: 20                     # 10 → 20: larger anchor window for scan-matching in new rooms
+    scan_buffer_size: 10                     # restored to 10; larger values add pressure on CorrelationGrid during startup crash window
     scan_buffer_maximum_scan_distance: 8.0
 
     # ── Correlation search ────────────────────────────────────────────────
-    correlation_search_space_dimension: 0.35       # 0.3→0.5 caused lateral slide in featureless corridors; 0.35 balances multi-room recovery vs wall accuracy
+    correlation_search_space_dimension: 0.30       # must be exact multiple of resolution (0.10) — non-integer multiples cause karto CorrelationGrid OOB crash at ~35s
     correlation_search_space_resolution: 0.05
     correlation_search_space_smear_deviation: 0.10
 

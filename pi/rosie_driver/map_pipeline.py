@@ -774,7 +774,7 @@ class MapPipeline:
 
         if save_status.get("state") != "success":
             raise RuntimeError(
-                f"slam_online map save failed: {save_status.get('error', 'unknown')}"
+                f"slam_online map save failed: {save_status.get('detail', save_status.get('error', 'unknown'))}"
             )
 
         # Validate source files.
