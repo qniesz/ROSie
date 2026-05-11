@@ -122,9 +122,16 @@ function Invoke-Pi {
     $sshArgs += @($target, $Command)
 
     # Run ssh.exe directly (no cmd /c wrapper) so argument quoting is sane.
-    $native = Invoke-NativeCapture -Exe "ssh.exe" -Arguments $sshArgs
-    $code = $native.ExitCode
-    $outStr = $native.Output
+    # Retry up to 3 times on SSH transport failures (exit 255 = connection lost).
+    $maxTries = 3
+    for ($try = 1; $try -le $maxTries; $try++) {
+        $native = Invoke-NativeCapture -Exe "ssh.exe" -Arguments $sshArgs
+        $code = $native.ExitCode
+        $outStr = $native.Output
+        if ($code -ne 255 -or $try -eq $maxTries) { break }
+        Write-Host "       SSH transport error (attempt $try/$maxTries) - retrying in 5s..." -ForegroundColor DarkGray
+        Start-Sleep -Seconds 5
+    }
     if (-not $AllowFail -and $code -ne 0) {
         Write-Fail "Remote command failed (exit $code)`n  cmd : $Command`n  out : $outStr"
     }
@@ -327,7 +334,6 @@ try {
     if ($waited -and $tcp.Connected) {
         $tcp.EndConnect($connect)
         $tcp.Close()
-        Write-OK
     } else {
         $tcp.Close()
         Write-Fail "Cannot reach $script:PiHost on port 22 (timed out).`n       Check that the Pi is powered on, connected to the network, and the IP address in ROSie.conf is correct."
@@ -335,6 +341,19 @@ try {
 } catch {
     Write-Fail "Cannot reach $script:PiHost on port 22: $_`n       Check that the Pi is powered on, connected to the network, and the IP address in ROSie.conf is correct."
 }
+# Port 22 is open - now wait for SSH to be fully ready (avoids mid-boot failures)
+$sshReady = $false
+for ($i = 1; $i -le 12; $i++) {
+    $testArgs = @() + $script:SshBaseOpts + @("-i", (Join-Path $env:USERPROFILE ".ssh\rosie_deploy_ed25519"), "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "$script:PiUser@$script:PiHost", "echo READY")
+    $r = Invoke-NativeCapture -Exe "ssh.exe" -Arguments $testArgs
+    if ($r.ExitCode -eq 0 -and $r.Output -match "READY") { $sshReady = $true; break }
+    Write-Host "       SSH not ready yet (attempt $i/12) - waiting 5s..." -ForegroundColor DarkGray
+    Start-Sleep -Seconds 5
+}
+if (-not $sshReady) {
+    Write-Fail "SSH did not become ready on $script:PiHost after 60 seconds. Check the Pi is fully booted."
+}
+Write-OK
 
 # --- Clear any stale host key in the personal known_hosts --------------------
 # If the Pi was reflashed, the user's main known_hosts file may still have an
@@ -688,8 +707,26 @@ APT::Periodic::AutocleanInterval `"7`";
 
     # --- Reboot ---------------------------------------------------------------
     Write-Step "Rebooting Pi to apply all changes"
-    Write-Host "       The Pi will reboot now. Reconnect in ~30 seconds." -ForegroundColor Yellow
+    Write-Host "       Sending reboot command..." -ForegroundColor Yellow
     Invoke-Pi "sudo reboot" -UseKey -AllowFail | Out-Null
+    # Wait for SSH to drop (Pi is rebooting)
+    Write-Host "       Waiting for Pi to go down..." -ForegroundColor Gray
+    Start-Sleep -Seconds 10
+    # Poll until SSH comes back (up to 90 seconds)
+    Write-Host "       Waiting for Pi to come back online..." -ForegroundColor Gray
+    $back = $false
+    for ($i = 1; $i -le 18; $i++) {
+        $testArgs = @() + $script:SshBaseOpts + @("-i", $script:KeyPath, "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "$script:PiUser@$script:PiHost", "echo UP")
+        $r = Invoke-NativeCapture -Exe "ssh.exe" -Arguments $testArgs
+        if ($r.ExitCode -eq 0 -and $r.Output -match "UP") { $back = $true; break }
+        Write-Host "       Still waiting... ($($i * 5)s)" -ForegroundColor DarkGray
+        Start-Sleep -Seconds 5
+    }
+    if ($back) {
+        Write-Host "       Pi is back online." -ForegroundColor Green
+    } else {
+        Write-Warn "Pi did not come back within 90 seconds - it may still be booting."
+    }
     Write-OK
 
     # --- Summary --------------------------------------------------------------
