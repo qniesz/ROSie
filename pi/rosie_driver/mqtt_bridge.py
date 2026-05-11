@@ -439,8 +439,6 @@ class MQTTBridge:
             cat = "diagnostic" if btn_id in (
                 "update_status", "clear_errors", "activate", "deactivate",
                 "shutdown", "powercycle",
-                "test_bumper_fl", "test_bumper_fr",
-                "test_bumper_sl", "test_bumper_sr",
             ) else None
             cfg = {
                 "name": label,

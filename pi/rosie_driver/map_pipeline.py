@@ -38,6 +38,7 @@ import json
 import logging
 import math
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -338,11 +339,19 @@ class MapPipeline:
             import psutil
             cpu = psutil.cpu_percent(interval=None)
             ram = psutil.virtual_memory()
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                ip_addr = s.getsockname()[0]
+                s.close()
+            except Exception:
+                ip_addr = "unknown"
             payload = {
                 "cpu_percent": round(cpu, 1),
                 "ram_used_mb": round(ram.used / 1024 / 1024),
                 "ram_percent": round(ram.percent, 1),
                 "ram_total_mb": round(ram.total / 1024 / 1024),
+                "ip_address": ip_addr,
             }
             self._mqtt.publish("diagnostics", payload, retain=True)
         except ImportError:
@@ -1157,6 +1166,16 @@ class MapPipeline:
             "state_topic": f"{pfx}/diagnostics",
             "value_template": "{{ value_json.ram_used_mb }} MB used ({{ value_json.ram_percent }}%)",
             "icon": "mdi:memory",
+        })
+
+        # Sensor: Pi IP Address
+        self._pub_discovery("sensor", "ip_address", {
+            "name": "Pi IP Address",
+            "unique_id": "rosie_ip_address",
+            "state_topic": f"{pfx}/diagnostics",
+            "value_template": "{{ value_json.ip_address }}",
+            "icon": "mdi:ip-network",
+            "entity_category": "diagnostic",
         })
 
         # Button: Update Software
