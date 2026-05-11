@@ -82,7 +82,7 @@ cards:
           - background-color: "rgba(255,255,255,0.15)"
           - display: |
               [[[
-                return states['binary_sensor.rosie_docked']?.state === 'on'
+                return states['binary_sensor.rosie_ext_power']?.state === 'on'
                   ? 'block' : 'none';
               ]]]
     custom_fields:
@@ -92,7 +92,7 @@ cards:
         ]]]
       dock: |
         [[[
-          return states['binary_sensor.rosie_docked']?.state === 'on'
+          return states['binary_sensor.rosie_ext_power']?.state === 'on'
             ? '⚡ DOCKED' : '';
         ]]]
     extra_styles: |
@@ -278,7 +278,7 @@ cards:
       - type: conditional
         conditions:
           - condition: state
-            entity: binary_sensor.rosie_docked
+            entity: binary_sensor.rosie_ext_power
             state: "off"
         card:
           type: custom:button-card
@@ -451,7 +451,7 @@ cards:
         name: Battery Temperature
       - entity: binary_sensor.rosie_charging
         name: Charging
-      - entity: binary_sensor.rosie_docked
+      - entity: binary_sensor.rosie_ext_power
         name: Docked
       - entity: sensor.rosie_ui_state
         name: UI State

@@ -558,13 +558,28 @@ try {
         "build tools (gcc, python3-dev, python3-venv, git)"            = "gcc python3-dev python3-venv git"
         "system services (unattended-upgrades, mosquitto-clients)"     = "unattended-upgrades mosquitto-clients fonts-dejavu-core"
         "python libs (numpy, scipy, pillow, serial, psutil)"           = "python3-numpy python3-scipy python3-pil python3-serial python3-psutil"
-        "docker (for slam_toolbox offline + online images)"            = "docker.io"
     }
     foreach ($label in $pkgGroups.Keys) {
         Write-Host ("       installing {0}..." -f $label) -ForegroundColor Gray
         $grp = $pkgGroups[$label]
         Invoke-PiSudo "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $grp" | Out-Null
         Write-Host "           done" -ForegroundColor DarkGray
+    }
+
+    # Install Docker CE from official repo (docker.io was removed from Debian trixie)
+    Write-Host "       installing docker (from get.docker.com)..." -ForegroundColor Gray
+    $dockerCheck = Invoke-Pi "command -v docker" -UseKey -AllowFail
+    if ($dockerCheck.ExitCode -eq 0) {
+        Write-Host "           docker already installed, skipping" -ForegroundColor DarkGray
+    } else {
+        $dockerInstall = Invoke-PiSudo "curl -fsSL https://get.docker.com | sh" -AllowFail
+        if ($dockerInstall.ExitCode -ne 0) {
+            Write-Warn "Docker install returned exit $($dockerInstall.ExitCode) - map pipeline will not work until Docker is installed"
+        } else {
+            # Add rosie user to docker group so rosie.service can run docker without sudo
+            Invoke-PiSudo "usermod -aG docker $script:PiUser" | Out-Null
+            Write-Host "           done" -ForegroundColor DarkGray
+        }
     }
 
     # Board-specific packages
@@ -588,7 +603,19 @@ try {
     }
     if ($script:ForceWipe) {
         Write-Host "       Removing existing ~/rosie directory..." -ForegroundColor Gray
-        Invoke-Pi "rm -rf ~/rosie" -UseKey | Out-Null
+        # Stop services that have bind mounts into ~/rosie (rosie-mosquitto mounts
+        # ~/rosie/pi/mosquitto; if it's running with Restart=on-failure, Docker will
+        # recreate the bind-mount source directory the moment rm -rf removes it).
+        Invoke-PiSudo "systemctl stop rosie.service rosie-mosquitto.service 2>/dev/null; true" -AllowFail | Out-Null
+        # Use sudo: docker build artifacts may be owned by root and block a normal rm
+        $rmResult = Invoke-PiSudo "rm -rf /home/$script:PiUser/rosie" -AllowFail
+        if ($rmResult.ExitCode -ne 0) {
+            Write-Fail "Could not remove ~/rosie (exit $($rmResult.ExitCode)): $($rmResult.Output)"
+        }
+        $stillThere = (Invoke-Pi "test -d ~/rosie && echo YES || echo NO" -UseKey -AllowFail).Output.Trim()
+        if ($stillThere -eq "YES") {
+            Write-Fail "~/rosie still exists after rm -rf (permission issue). SSH in and remove it manually with: sudo rm -rf ~/rosie"
+        }
     }
     $cloneNeeded = (Invoke-Pi "test -d ~/rosie/.git && echo EXISTS || echo NONE" -UseKey -AllowFail).Output.Trim() -eq "NONE"
     if ($cloneNeeded) {

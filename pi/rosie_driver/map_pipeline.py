@@ -1072,6 +1072,7 @@ class MapPipeline:
         stale = [
             f"button/{slug}_start_scan_log",
             f"button/{slug}_stop_scan_log",
+            f"button/{slug}_create_map",  # renamed to create_new_map
         ]
         # If this device uses a prefix other than "rosie", also wipe the old
         # hardcoded "rosie_" topics that were previously published under this
@@ -1090,9 +1091,8 @@ class MapPipeline:
             )
 
         # Button: Create New Map
-        self._pub_discovery("button", "create_map", {
+        self._pub_discovery("button", "create_new_map", {
             "name": "Create New Map",
-            "unique_id": "rosie_create_map",
             "command_topic": f"{pfx}/command",
             "payload_press": "create_map",
             "icon": "mdi:map-plus",
