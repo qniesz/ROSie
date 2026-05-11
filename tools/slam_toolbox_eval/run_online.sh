@@ -370,12 +370,12 @@ seed_initial_pose() {
         "{header: {stamp: {sec: 0, nanosec: 0}, frame_id: 'map'}, \
 pose: {pose: {position: {x: ${px}, y: ${py}, z: 0.0}, \
 orientation: {x: 0.0, y: 0.0, z: ${qz}, w: ${qw}}}, \
-covariance: [0.25,0.0,0.0,0.0,0.0,0.0, \
-             0.0,0.25,0.0,0.0,0.0,0.0, \
+covariance: [0.0025,0.0,0.0,0.0,0.0,0.0, \
+             0.0,0.0025,0.0,0.0,0.0,0.0, \
              0.0,0.0,0.0,0.0,0.0,0.0, \
              0.0,0.0,0.0,0.0,0.0,0.0, \
              0.0,0.0,0.0,0.0,0.0,0.0, \
-             0.0,0.0,0.0,0.0,0.0,0.068]}}" \
+             0.0,0.0,0.0,0.0,0.0,0.0076]}}" \
         2>/dev/null \
         && echo "  initial pose seeded OK" \
         || echo "  WARNING: initial pose seed failed (non-fatal)"

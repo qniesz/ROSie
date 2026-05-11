@@ -282,7 +282,7 @@ def init():
 
 
 def check(x: float, y: float, theta: float = 0.0, angular_vel: float = 0.0,
-          linear_vel: float = 0.0):
+          linear_vel: float = 0.0, pose_source: str = ""):
     """Evaluate robot position against all no-go lines.
 
     For each line the perpendicular distance from the robot centre is compared

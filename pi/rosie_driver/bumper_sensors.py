@@ -82,10 +82,23 @@ _enabled = _env_flag("ROSIE_BUMPER_ENABLED", default=True)
 def _setup_gpio() -> bool:
     global _backend, _gpio_ready
     b = create_bumper_gpio()
-    try:
-        ok = b.setup()
-    except Exception as exc:
-        logger.error("[bumper_sensors] GPIO setup failed: %s", exc)
+    for attempt in range(2):
+        try:
+            ok = b.setup()
+            break
+        except OSError as exc:
+            if exc.errno == 16 and attempt == 0:  # EBUSY — previous process still holds lines
+                logger.warning("[bumper_sensors] GPIO busy, retrying in 2 s…")
+                time.sleep(2.0)
+                b = create_bumper_gpio()
+                continue
+            logger.error("[bumper_sensors] GPIO setup failed: %s", exc)
+            return False
+        except Exception as exc:
+            logger.error("[bumper_sensors] GPIO setup failed: %s", exc)
+            return False
+    else:
+        logger.error("[bumper_sensors] GPIO setup failed after retry")
         return False
     _backend = b
     if not ok or isinstance(b, NullGpioBackend):

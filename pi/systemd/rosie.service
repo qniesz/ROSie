@@ -2,6 +2,10 @@
 Description=ROSie — Neato D6 driver + map pipeline (Pi Zero 2 W)
 After=network-online.target
 Wants=network-online.target
+# Stop the GPIO prestart service (which holds bumper lines as INPUT during boot)
+# before claiming the same lines in the driver.
+Conflicts=rosie-gpio-prestart.service
+After=rosie-gpio-prestart.service
 
 [Service]
 Type=simple
