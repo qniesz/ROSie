@@ -41,7 +41,8 @@ XML
 COPY mqtt_ros_bridge.py        /eval/mqtt_ros_bridge.py
 COPY rosie_vac_marker.py      /eval/rosie_vac_marker.py
 COPY lifecycle_activate.py     /eval/lifecycle_activate.py
-COPY slam_params_online.yaml   /eval/slam_params_online.yaml
+COPY slam_params_online.yaml        /eval/slam_params_online.yaml
+COPY slam_params_localization.yaml  /eval/slam_params_localization.yaml
 COPY rosie_foxglove.urdf       /eval/robot/rosie_foxglove.urdf
 COPY run_online.sh             /eval/run_online.sh
 RUN chmod +x /eval/run_online.sh /eval/mqtt_ros_bridge.py /eval/rosie_vac_marker.py /eval/lifecycle_activate.py

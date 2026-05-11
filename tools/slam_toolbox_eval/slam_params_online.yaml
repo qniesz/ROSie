@@ -36,7 +36,7 @@ slam_toolbox:
     scan_buffer_maximum_scan_distance: 8.0
 
     # ── Correlation search ────────────────────────────────────────────────
-    correlation_search_space_dimension: 0.30       # must be exact multiple of resolution (0.10) — non-integer multiples cause karto CorrelationGrid OOB crash at ~35s
+    correlation_search_space_dimension: 0.40       # must be exact multiple of resolution (0.10); 0.30 too narrow → divergence/ghost maps; 0.35 caused OOB crash (not multiple); 0.50 caused lateral slide
     correlation_search_space_resolution: 0.05
     correlation_search_space_smear_deviation: 0.10
 
