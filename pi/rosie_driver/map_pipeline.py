@@ -109,6 +109,7 @@ class MapPipeline:
         # driver calls update_device_info() after reading GetVersion.
         self._device = dict(_DEFAULT_DEVICE)
         self._device["identifiers"] = [f"{self._pfx}_neato_d6"]
+        self._device["name"] = mqtt._device.get("name", _DEFAULT_DEVICE["name"])
 
         # ── Pipeline state ────────────────────────────────────────────────
         self._status = IDLE
