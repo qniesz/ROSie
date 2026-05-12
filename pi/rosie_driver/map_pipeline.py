@@ -915,6 +915,16 @@ class MapPipeline:
             except Exception:
                 pass
 
+            # Remove any stopped-but-not-removed container (--rm only fires on
+            # clean exit; a SIGTERM or OOM can leave a stale stopped container).
+            try:
+                subprocess.run(
+                    ["docker", "rm", self._SLAM_CONTAINER],
+                    capture_output=True, timeout=10, check=False,
+                )
+            except Exception:
+                pass
+
             _res = _slam_resources()
             logger.info("slam_online start (ensure): board resources: %s", _res)
             subprocess.Popen(
@@ -959,14 +969,16 @@ class MapPipeline:
         mode, then blocks until lifecycle_status.txt reports "active" or
         a 120 s timeout expires.
         """
-        # Stop any running instance first (ignore errors if not running).
-        try:
-            subprocess.run(
-                ["docker", "stop", self._SLAM_CONTAINER],
-                capture_output=True, timeout=30, check=False,
-            )
-        except Exception:
-            pass
+        # Stop and remove any stale instance (ignore errors if not running).
+        # docker rm is needed because --rm only fires on a clean exit; a
+        # SIGTERM mid-pipeline can leave a stopped-but-not-removed container
+        # that causes the next `docker run --name` to fail with exit 125.
+        for _cmd in (["docker", "stop", self._SLAM_CONTAINER],
+                     ["docker", "rm",   self._SLAM_CONTAINER]):
+            try:
+                subprocess.run(_cmd, capture_output=True, timeout=30, check=False)
+            except Exception:
+                pass
 
         # Delete posegraph so container picks MAPPING mode.
         for p in (self._POSEGRAPH_HOST, self._POSEGRAPH_DATA):
