@@ -10,7 +10,7 @@ slam_toolbox:
     ceres_preconditioner: SCHUR_JACOBI
     ceres_trust_strategy: LEVENBERG_MARQUARDT
     ceres_dogleg_type: TRADITIONAL_DOGLEG
-    ceres_loss_function: None
+    ceres_loss_function: HuberLoss  # downweight outlier scan matches (false loop closures)
     # Use all 4 cores on the Pi Zero 2 W for the Ceres solver.
     ceres_num_threads: 4
 
@@ -20,7 +20,7 @@ slam_toolbox:
     minimum_time_interval: 0.2    # offline replay paces this; keep loose
     transform_timeout: 0.5
     tf_buffer_duration: 30.0
-    stack_size_to_use: 40000000   # 10 MB → 40 MB default; plenty of RAM on Armbian 1.5 GB Pi
+    stack_size_to_use: 20000000   # 40 MB → 20 MB: match online params; eval runs on same Pi
 
     use_scan_matching: true
     use_scan_barycenter: true
@@ -30,7 +30,7 @@ slam_toolbox:
     # Limit retained scan history (default ~70). Each scan keeps a Karto
     # LocalizedRangeScan with raw + corrected readings; trimming this is a
     # near-linear RAM win for long sessions.
-    scan_buffer_size: 50          # 20 → 50; more retained scans for better loop closure on 1.5 GB Pi
+    scan_buffer_size: 30          # keep in sync with online params; avoids OOM on long runs
     scan_buffer_maximum_scan_distance: 10.0
 
     # ── Correlation search (smaller = much less RAM) ──────────────────────
@@ -39,14 +39,19 @@ slam_toolbox:
     correlation_search_space_smear_deviation: 0.10
 
     # ── Loop closure (this is the whole reason we're here) ────────────────
-    loop_search_space_dimension: 6.0     # 4.0 → 6.0; larger range for better loop closure on 1.5 GB Pi
+    # IMPORTANT: keep these in sync with slam_params_online.yaml.
+    # loop_search_space_dimension >= 6.0 causes crashes (seen on this Pi).
+    # Thresholds 0.35/0.45 are far too loose — they produce false cross-room
+    # closures that explode the map to 200+ m × 200+ m.
+    do_loop_closing: true
+    loop_search_space_dimension: 2.0     # 6.0 → 2.0: >= 6.0 crashes; tight avoids cross-room false matches
     loop_search_space_resolution: 0.05
     loop_search_space_smear_deviation: 0.03
     loop_search_maximum_distance: 3.0
-    loop_match_minimum_chain_size: 10
-    loop_match_maximum_variance_coarse: 3.0
-    loop_match_minimum_response_coarse: 0.35
-    loop_match_minimum_response_fine: 0.45
+    loop_match_minimum_chain_size: 15
+    loop_match_maximum_variance_coarse: 0.4   # 3.0 default → 0.4: much tighter; prevents false closure explosions
+    loop_match_minimum_response_coarse: 0.60  # 0.35 → 0.60: stricter coarse gate (matching online)
+    loop_match_minimum_response_fine: 0.70    # 0.45 → 0.70: stricter fine gate (matching online)
 
     # ── Map / mode ─────────────────────────────────────────────────────────
     map_update_interval: 5.0

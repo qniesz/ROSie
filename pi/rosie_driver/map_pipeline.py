@@ -103,9 +103,9 @@ def _slam_resources() -> dict:
 
     if is_orangepi:
         return {
-            "online_mem":   os.environ.get("ROSIE_SLAM_ONLINE_MEM",  "700m"),
-            "eval_mem":     os.environ.get("ROSIE_SLAM_MEM",         "900m"),
-            "swap":         os.environ.get("ROSIE_SLAM_SWAP",        "1500m"),
+            "online_mem":   os.environ.get("ROSIE_SLAM_ONLINE_MEM",  "900m"),
+            "eval_mem":     os.environ.get("ROSIE_SLAM_MEM",         "1200m"),
+            "swap":         os.environ.get("ROSIE_SLAM_SWAP",        "2048m"),
             "omp_threads":  os.environ.get("ROSIE_SLAM_OMP_THREADS", "4"),
         }
     else:
@@ -492,10 +492,12 @@ class MapPipeline:
         Writes to ~/logs/<YYYYMMDD-HHMMSS>/:
             pipeline_result.json  — summary (elapsed, status, scan count, error)
             rosie-service.log     — last 1200 lines of journalctl -u rosie
-            slam.log              — docker logs rosie_slam_online (full session)
-            bridge.log            — /tmp/rosie_online_out/bridge.log (if present)
-            online.log            — /tmp/rosie_online_out/online.log (if present)
-            mode.json             — /tmp/rosie_online_out/mode.json (if present)
+            slam.log              — slam_toolbox stdout (host-mounted, survives --rm)
+            bridge.log            — mqtt_ros_bridge.py stdout (host-mounted)
+            online.log            — run_online.sh stdout (host-mounted)
+            lifecycle.log         — lifecycle activator stdout (host-mounted)
+            foxglove.log          — foxglove bridge stdout (host-mounted)
+            mode.json             — SLAM mode metadata (host-mounted)
         """
         import datetime
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -536,27 +538,21 @@ class MapPipeline:
         except Exception:
             logger.debug("diag: could not collect rosie journal", exc_info=True)
 
-        # ── slam.log (docker logs for the online container) ──────────────
-        try:
-            res = subprocess.run(
-                ["docker", "logs", "rosie_slam_online", "--since",
-                 f"{int(elapsed + 120)}s"],
-                capture_output=True, text=True, timeout=20, check=False,
-            )
-            # docker logs mixes stdout+stderr; combine both
-            slam_text = res.stdout + res.stderr
-            (log_dir / "slam.log").write_text(slam_text)
-        except Exception:
-            logger.debug("diag: could not collect slam container logs", exc_info=True)
-
-        # ── files from /tmp/rosie_online_out/ ────────────────────────────
-        online_out = Path("/tmp/rosie_online_out")
-        for fname in ("bridge.log", "online.log", "lifecycle.log",
-                      "foxglove.log", "mode.json"):
-            src = online_out / fname
+        # ── slam container output files (host-mounted at _SLAM_OUT_HOST) ─
+        # These are the most valuable diagnostics: slam.log captures every
+        # slam_toolbox event including loop-closure firings (look for the
+        # "preprocessor.cc:67" Ceres warning — it fires once per loop closure
+        # invocation, and a sudden one mid-run is the classic "map rotated"
+        # smoking gun). The host mount survives --rm, unlike `docker logs`
+        # which returns "No such container" once the slam_online container exits.
+        import shutil
+        for fname in ("slam.log", "bridge.log", "online.log", "lifecycle.log",
+                      "foxglove.log", "vac_marker.log",
+                      "robot_state_publisher.log", "save_status.json",
+                      "lifecycle_status.txt", "mode.json"):
+            src = self._SLAM_OUT_HOST / fname
             if src.exists():
                 try:
-                    import shutil
                     shutil.copy2(src, log_dir / fname)
                 except Exception:
                     logger.debug("diag: copy %s failed", fname, exc_info=True)
@@ -789,8 +785,8 @@ class MapPipeline:
 
         Tunables (env):
             ROSIE_SLAM_IMAGE   docker image (default rosie-slam-eval:latest)
-            ROSIE_SLAM_SPEED   replay speed multiplier (default "3")
-            ROSIE_SLAM_SETTLE  post-replay settle seconds (default "20")
+            ROSIE_SLAM_SPEED   replay speed multiplier (default "2")
+            ROSIE_SLAM_SETTLE  post-replay settle seconds (default "45")
             ROSIE_SLAM_TIMEOUT subprocess timeout seconds (default "1500")
             ROSIE_SLAM_PARAMS  optional path to slam_params.yaml; if set and
                                readable, mounted into the container so param
@@ -799,8 +795,8 @@ class MapPipeline:
         import re as _re
 
         image   = os.environ.get("ROSIE_SLAM_IMAGE",   "rosie-slam-eval:latest")
-        speed   = os.environ.get("ROSIE_SLAM_SPEED",   "5")
-        settle  = os.environ.get("ROSIE_SLAM_SETTLE",  "20")
+        speed   = os.environ.get("ROSIE_SLAM_SPEED",   "2")
+        settle  = os.environ.get("ROSIE_SLAM_SETTLE",  "45")
         timeout = int(os.environ.get("ROSIE_SLAM_TIMEOUT", "1500"))
 
         # Default params override: ~/rosie/tools/slam_toolbox_eval/slam_params.yaml

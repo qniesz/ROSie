@@ -67,6 +67,7 @@ class UserSettings:
     warning_sounds: bool = False
     bin_full_detect: bool = False
     led: bool = False
+    nav_mode: str = "Normal"
 
 
 def get_battery(serial: NeatoSerial) -> BatteryState:
@@ -216,8 +217,11 @@ def get_robot_state(serial: NeatoSerial) -> RobotState:
     return state
 
 
+_NAV_MODES = {"Normal", "Gentle", "Deep", "Quick"}
+
+
 def get_user_settings(serial: NeatoSerial) -> UserSettings:
-    """Read user-configurable settings via GetUserSettings."""
+    """Read user-configurable settings via GetUserSettings + GetNavigationMode."""
     lines = serial.send_and_collect("GetUserSettings", "GetUserSettings", timeout=1.0)
     settings = UserSettings()
 
@@ -244,6 +248,21 @@ def get_user_settings(serial: NeatoSerial) -> UserSettings:
             settings.bin_full_detect = val == "ON"
         elif key == "LED":
             settings.led = val == "ON"
+
+    # Read navigation mode separately — not part of GetUserSettings
+    nav_lines = serial.send_and_collect("GetNavigationMode", "GetNavigationMode", timeout=1.0)
+    for line in nav_lines:
+        # Try key,value format (e.g. "NavigationMode,Quick")
+        parts = line.split(",")
+        candidate = parts[-1].strip().capitalize()
+        if candidate in _NAV_MODES:
+            settings.nav_mode = candidate
+            break
+        # Also handle bare value (e.g. just "Quick")
+        bare = line.strip().capitalize()
+        if bare in _NAV_MODES:
+            settings.nav_mode = bare
+            break
 
     return settings
 

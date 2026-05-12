@@ -8,7 +8,7 @@ Reads the JSONL produced by pi/rosie_driver/scan_recorder.py and publishes:
   /tf     odom -> base_link        — from same odom
   /tf_static  base_link -> laser   — identity (LDS centred on robot)
 
-Pacing: replays at ~5x real-time by default (offline eval, no timing constraint).
+Pacing: replays at ~2x real-time by default (offline eval, no timing constraint).
 
 When the log is exhausted, sleeps a few seconds (so slam_toolbox processes the
 last batch + any pending loop closures), then writes /out/done.flag.
@@ -36,8 +36,8 @@ from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
 
 LOG_PATH = Path(os.environ.get("ROSIE_REPLAY_LOG", "/data/scan.jsonl"))
 DONE_FLAG = Path(os.environ.get("ROSIE_REPLAY_DONE", "/out/done.flag"))
-SPEED = float(os.environ.get("ROSIE_REPLAY_SPEED", "5.0"))   # x real-time
-SETTLE_SEC = float(os.environ.get("ROSIE_REPLAY_SETTLE", "10.0"))
+SPEED = float(os.environ.get("ROSIE_REPLAY_SPEED", "2.0"))   # x real-time
+SETTLE_SEC = float(os.environ.get("ROSIE_REPLAY_SETTLE", "45.0"))
 
 
 def yaw_to_quat(yaw: float):

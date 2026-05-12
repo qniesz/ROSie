@@ -1026,6 +1026,7 @@ def main() -> None:
                         warning_sounds=settings.warning_sounds,
                         bin_full_detect=settings.bin_full_detect,
                         led=settings.led,
+                        nav_mode=settings.nav_mode,
                     )
                 except Exception:
                     logger.debug("Settings poll failed", exc_info=True)

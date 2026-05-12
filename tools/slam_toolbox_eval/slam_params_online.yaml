@@ -39,12 +39,30 @@ slam_toolbox:
     correlation_search_space_resolution: 0.02  # 0.05 → 0.02; finer search for better pose accuracy on 1.5 GB Pi
     correlation_search_space_smear_deviation: 0.10
 
-    # ── Loop closure ENABLED for online use ──────────────────────────────────
-    # Crashes seen at loop_search_space_dimension >= 6.0 m (now 4.0 m, safe).
-    # Without loop closure, odom drift from bump pivots causes slam_toolbox to
-    # insert disconnected graph nodes → robot appears to "find a new room".
-    do_loop_closing: true
-    loop_search_space_dimension: 2.0            # 4.0 → 2.0: halve search space; fewer false cross-room candidates
+    # ── Loop closure DISABLED for online use ─────────────────────────────────
+    #
+    # ⚠ DO NOT FLIP THIS BACK TO `true` WITHOUT READING THIS COMMENT.
+    #
+    # History (this has been toggled four times across May 2026):
+    #   true  → at ~15 min the robot re-enters a previously-mapped area; the
+    #           async slam_toolbox node fires its first global Ceres loop-closure
+    #           optimization, which finds an angular-ambiguous match and rotates
+    #           the entire pose graph. The live map tilts and every scan after
+    #           is added at the wrong heading. Smoking-gun evidence in
+    #           slam_online_out/slam.log: a single Ceres `preprocessor.cc:67`
+    #           warning fires at exactly the rotation timestamp (e.g. 18:09:53
+    #           on 2026-05-12, run started 17:55:11 = 14:42 in).
+    #   false → previously caused disconnected-room "ghost map" fragments,
+    #           BUT that was due to the old odometry.py serial-stall encoder
+    #           reset injecting position discontinuities. That code is GONE.
+    #           Without those jumps, scan-matching-only mode is stable.
+    #
+    # Architecture: online SLAM does scan matching only and stays geometrically
+    # stable for the whole run. The post-process eval pass (slam_params.yaml,
+    # do_loop_closing: true with strict thresholds) runs after the robot docks
+    # and produces the clean, loop-closed final map in 2-8 minutes.
+    do_loop_closing: false
+    loop_search_space_dimension: 2.0            # only used if do_loop_closing flipped on for testing
     loop_search_space_resolution: 0.05
     loop_search_space_smear_deviation: 0.03
     loop_search_maximum_distance: 3.0

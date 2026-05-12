@@ -270,6 +270,8 @@ class MQTTBridge:
             melody_sounds=melody_sounds, warning_sounds=warning_sounds,
             bin_full_detect=bin_full_detect, led=led,
         )
+        if nav_mode is not None:
+            self._nav_mode = nav_mode  # keep in sync with polled value
         payload = {
             "eco_mode": "ON" if s["eco_mode"] else "OFF",
             "wall_enable": "ON" if s["wall_enable"] else "OFF",
@@ -279,7 +281,7 @@ class MQTTBridge:
             "warning_sounds": "ON" if s["warning_sounds"] else "OFF",
             "bin_full_detect": "ON" if s["bin_full_detect"] else "OFF",
             "led": "ON" if s["led"] else "OFF",
-            "nav_mode": nav_mode if nav_mode is not None else self._nav_mode,
+            "nav_mode": self._nav_mode,
         }
         self._last_settings = payload
         self.publish("settings", payload, retain=True)
@@ -744,6 +746,13 @@ class MQTTBridge:
             if self._command_callback:
                 self._nav_mode = payload.strip()
                 self._command_callback(f"set_nav_mode:{payload}")
+                # Immediately republish so HA select entity sees the new value
+                # before the next 60s settings poll (avoids revert to old retained state)
+                if self._last_settings:
+                    updated = dict(self._last_settings)
+                    updated["nav_mode"] = self._nav_mode
+                    self._last_settings = updated
+                    self.publish("settings", updated, retain=True)
 
         # --- Vacuum motor direct control ---
         elif topic == f"{pfx}/vacuum_motor/set":
