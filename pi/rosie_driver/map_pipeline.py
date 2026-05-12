@@ -482,16 +482,101 @@ class MapPipeline:
     # Pipeline state machine
     # =========================================================================
 
+    def _save_pipeline_diag(
+        self,
+        start_time: float,
+        error: Optional[str],
+    ) -> None:
+        """Capture diagnostic logs at the end of each mapping run.
+
+        Writes to ~/logs/<YYYYMMDD-HHMMSS>/:
+            pipeline_result.json  — summary (elapsed, status, scan count, error)
+            rosie-service.log     — last 1200 lines of journalctl -u rosie
+            slam.log              — docker logs rosie_slam_online (full session)
+            bridge.log            — /tmp/rosie_online_out/bridge.log (if present)
+            online.log            — /tmp/rosie_online_out/online.log (if present)
+            mode.json             — /tmp/rosie_online_out/mode.json (if present)
+        """
+        import datetime
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        log_dir = Path.home() / "logs" / stamp
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            logger.warning("diag: could not create log dir %s", log_dir, exc_info=True)
+            return
+
+        elapsed = time.time() - start_time
+        scan_st = scan_recorder.get_status()
+
+        # ── pipeline_result.json ─────────────────────────────────────────
+        result = {
+            "timestamp": stamp,
+            "elapsed_s": round(elapsed, 1),
+            "outcome":   "error" if error else "success",
+            "error":     error,
+            "scan_count": scan_st.get("count", 0),
+            "scan_path":  scan_st.get("path"),
+        }
+        try:
+            (log_dir / "pipeline_result.json").write_text(
+                json.dumps(result, indent=2)
+            )
+        except Exception:
+            logger.debug("diag: could not write pipeline_result.json", exc_info=True)
+
+        # ── rosie-service.log (last 1200 lines of journalctl) ────────────
+        try:
+            res = subprocess.run(
+                ["journalctl", "-u", "rosie", "-n", "1200", "--no-pager",
+                 "--output=short-iso"],
+                capture_output=True, text=True, timeout=15, check=False,
+            )
+            (log_dir / "rosie-service.log").write_text(res.stdout)
+        except Exception:
+            logger.debug("diag: could not collect rosie journal", exc_info=True)
+
+        # ── slam.log (docker logs for the online container) ──────────────
+        try:
+            res = subprocess.run(
+                ["docker", "logs", "rosie_slam_online", "--since",
+                 f"{int(elapsed + 120)}s"],
+                capture_output=True, text=True, timeout=20, check=False,
+            )
+            # docker logs mixes stdout+stderr; combine both
+            slam_text = res.stdout + res.stderr
+            (log_dir / "slam.log").write_text(slam_text)
+        except Exception:
+            logger.debug("diag: could not collect slam container logs", exc_info=True)
+
+        # ── files from /tmp/rosie_online_out/ ────────────────────────────
+        online_out = Path("/tmp/rosie_online_out")
+        for fname in ("bridge.log", "online.log", "lifecycle.log",
+                      "foxglove.log", "mode.json"):
+            src = online_out / fname
+            if src.exists():
+                try:
+                    import shutil
+                    shutil.copy2(src, log_dir / fname)
+                except Exception:
+                    logger.debug("diag: copy %s failed", fname, exc_info=True)
+
+        logger.info("Pipeline diagnostics saved to %s (elapsed=%.0fs, outcome=%s)",
+                    log_dir, elapsed, result["outcome"])
+
     def _run_pipeline_guarded(self) -> None:
         with self._pipeline_lock:
             if self._status not in (IDLE, ERROR):
                 logger.warning("Pipeline already running — ignoring create_map")
                 return
+            self._pipeline_start = time.time()
+            _pipeline_error: Optional[str] = None
             try:
                 self._pipeline_impl()
             except Exception as exc:
                 logger.exception("Pipeline failed")
-                self._publish_status(ERROR, str(exc))
+                _pipeline_error = str(exc)
+                self._publish_status(ERROR, _pipeline_error)
             finally:
                 # Always stop scan recording when the pipeline exits, whether
                 # the run succeeded, failed, or was aborted. Safe to call when
@@ -502,6 +587,11 @@ class MapPipeline:
                         self._publish_scan_log_status()
                     except Exception:  # noqa: BLE001
                         logger.debug("scan_recorder.stop failed", exc_info=True)
+                # Capture diagnostic logs before we stop/remove the SLAM container.
+                try:
+                    self._save_pipeline_diag(self._pipeline_start, _pipeline_error)
+                except Exception:
+                    logger.debug("diag save failed", exc_info=True)
                 # Stop the SLAM container if it's still running (e.g., pipeline
                 # failed mid-mapping before _save_mapping_slam() was called).
                 try:
