@@ -44,14 +44,14 @@ slam_toolbox:
     # Without loop closure, odom drift from bump pivots causes slam_toolbox to
     # insert disconnected graph nodes → robot appears to "find a new room".
     do_loop_closing: true
-    loop_search_space_dimension: 4.0
+    loop_search_space_dimension: 2.0            # 4.0 → 2.0: halve search space; fewer false cross-room candidates
     loop_search_space_resolution: 0.05
     loop_search_space_smear_deviation: 0.03
     loop_search_maximum_distance: 3.0
-    loop_match_minimum_chain_size: 15            # raised from 10: kept for safety
-    loop_match_maximum_variance_coarse: 2.0      # raised from 3.0: kept for safety
-    loop_match_minimum_response_coarse: 0.50     # raised from 0.35: kept for safety
-    loop_match_minimum_response_fine: 0.60       # raised from 0.45: kept for safety
+    loop_match_minimum_chain_size: 15
+    loop_match_maximum_variance_coarse: 0.4      # slam_toolbox default; 2.0 was 5x too loose and caused false-closure explosions
+    loop_match_minimum_response_coarse: 0.60     # raised from 0.50: stricter coarse gate
+    loop_match_minimum_response_fine: 0.70       # raised from 0.60: stricter fine gate
 
     # ── Map / mode ─────────────────────────────────────────────────────────
     map_update_interval: 5.0       # 30.0 → 5.0: publish /map every 5 s so Foxglove shows live progress

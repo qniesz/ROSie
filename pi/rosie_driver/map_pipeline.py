@@ -394,6 +394,12 @@ class MapPipeline:
             self._mqtt.publish("diagnostics", payload, retain=True)
         except ImportError:
             pass   # psutil optional
+        # Republish pipeline status so HA always catches up after a bridge drop.
+        self._mqtt.publish(
+            "map_pipeline/status",
+            {"status": self._status, "detail": ""},
+            qos=1, retain=True,
+        )
 
     # =========================================================================
     # Scan-log status
