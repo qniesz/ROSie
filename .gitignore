@@ -28,6 +28,10 @@ backup/
 
 # Real mosquitto config contains credentials — commit only the .example
 pi/mosquitto/mosquitto.conf
+
+# Docker image tarballs — too large for git
+*.tar
+*.tar.gz
 # Ignore everything under tools/ except the slam_toolbox eval source —
 # Dockerfile + replay node + params need to ship so the Pi can rebuild the
 # image and the runtime params mount can find slam_params.yaml.

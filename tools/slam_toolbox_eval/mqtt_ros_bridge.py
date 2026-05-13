@@ -80,6 +80,11 @@ class BridgeNode(Node):
         self.slam_mode = os.environ.get("SLAM_MODE", "unknown")
         self.slam_map_name = os.environ.get("SLAM_MAP_NAME", "")
         self.slam_map_id = os.environ.get("SLAM_MAP_ID", "")
+        # When rf2o is active, the bridge hands off odom→base_link TF ownership
+        # to rf2o_laser_odometry_node once scans start flowing.  During the
+        # initial scan holdoff window the bridge still publishes wheel-encoder
+        # TF so slam_toolbox has a valid chain at activation time.
+        self._rf2o_mode = os.environ.get("ROSIE_RF2O", "0") == "1"
 
         # ── ROS publishers / TF ──────────────────────────────────────
         scan_qos = QoSProfile(
@@ -222,7 +227,10 @@ class BridgeNode(Node):
             ls.range_max = float(p.get("range_max", 5.0))
             # 0 -> inf so slam_toolbox treats them as no-return
             ls.ranges = [float(r) if r > 0 else float("inf") for r in ranges]
-            self._republish_odom_at(ls.header.stamp)
+            # In rf2o mode, rf2o owns the odom→base_link TF once scans flow;
+            # the bridge only re-stamps wheel-odom TF during the holdoff window.
+            if not self._rf2o_mode:
+                self._republish_odom_at(ls.header.stamp)
             self.scan_pub.publish(ls)
             self.scan_count += 1
         except Exception as e:
@@ -278,7 +286,11 @@ class BridgeNode(Node):
             t.transform.rotation.y = qy
             t.transform.rotation.z = qz
             t.transform.rotation.w = qw
-            self.tf_br.sendTransform(t)
+            # In rf2o mode, only publish wheel-encoder odom TF during the scan
+            # holdoff window.  Once scans start flowing rf2o takes ownership of
+            # odom→base_link and publishing both would cause TF conflicts.
+            if not self._rf2o_mode or time.time() < self._scan_ready_time:
+                self.tf_br.sendTransform(t)
             # Cache the transform so _handle_scan can republish it at scan time
             self._last_odom_transform = t.transform
             self.odom_count += 1

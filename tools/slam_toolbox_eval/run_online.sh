@@ -13,6 +13,9 @@
 set -eo pipefail
 set +u
 source /opt/ros/jazzy/setup.bash
+# rf2o is built from source (not in Jazzy apt); overlay its install workspace.
+# shellcheck disable=SC1091
+[ -f /rf2o_ws/install/setup.bash ] && source /rf2o_ws/install/setup.bash
 set -u
 
 OUT=/out
@@ -181,6 +184,33 @@ echo "--- starting MQTT<->ROS bridge ---"
 python3 /eval/mqtt_ros_bridge.py > "$OUT/bridge.log" 2>&1 &
 BRIDGE_PID=$!
 
+# 1b) rf2o scan-matching odometry (replaces wheel-encoder TF for odom→base_link).
+# Enabled by default; disable with ROSIE_RF2O=0.
+# rf2o subscribes to /scan and publishes the odom→base_link TF via scan-to-scan
+# matching, dramatically reducing angular drift vs. wheel encoders.
+# The bridge hands off odom→base_link ownership to rf2o once scans start flowing
+# (it still publishes wheel-odom TF during the initial scan-holdoff window so
+# slam_toolbox always has a valid TF at activation time).
+RF2O_PID=""
+if [ "${ROSIE_RF2O:-1}" != "0" ]; then
+    echo "--- starting rf2o_laser_odometry (scan-matching odom) ---"
+    ros2 run rf2o_laser_odometry rf2o_laser_odometry_node \
+        --ros-args \
+        -p laser_scan_topic:=/scan \
+        -p odom_topic:=/odom \
+        -p base_frame_id:=base_link \
+        -p odom_frame_id:=odom \
+        -p publish_tf:=true \
+        -p freq:=10.0 \
+        > "$OUT/rf2o.log" 2>&1 &
+    RF2O_PID=$!
+    echo "  rf2o PID=$RF2O_PID"
+    export ROSIE_RF2O=1
+else
+    echo "--- rf2o disabled (ROSIE_RF2O=0) --- using wheel odometry ---"
+    export ROSIE_RF2O=0
+fi
+
 # 2) slam_toolbox
 echo "--- starting slam_toolbox ($SLAM_NODE) ---"
 ros2 run slam_toolbox "$SLAM_NODE" \
@@ -330,15 +360,17 @@ cleanup() {
     echo "--- cleanup ---"
     SAVE_RC=0
     save_map || SAVE_RC=$?
-    kill -INT "$SLAM_PID" "$BRIDGE_PID" ${FOXGLOVE_PID:+"$FOXGLOVE_PID"} ${ROBOT_STATE_PUBLISHER_PID:+"$ROBOT_STATE_PUBLISHER_PID"} ${VAC_MARKER_PID:+"$VAC_MARKER_PID"} ${LIFECYCLE_ACTIVATOR_PID:+"$LIFECYCLE_ACTIVATOR_PID"} 2>/dev/null || true
+    kill -INT "$SLAM_PID" "$BRIDGE_PID" ${RF2O_PID:+"$RF2O_PID"} ${FOXGLOVE_PID:+"$FOXGLOVE_PID"} ${ROBOT_STATE_PUBLISHER_PID:+"$ROBOT_STATE_PUBLISHER_PID"} ${VAC_MARKER_PID:+"$VAC_MARKER_PID"} ${LIFECYCLE_ACTIVATOR_PID:+"$LIFECYCLE_ACTIVATOR_PID"} 2>/dev/null || true
     # Also kill by name — guards against PID reuse where the monitored $SLAM_PID
     # gets recycled to a different process and the real slam_toolbox child
     # escapes the kill above, surviving container cleanup.
     pkill -INT -x sync_slam_toolbox_node 2>/dev/null || true
     pkill -INT -f "mqtt_ros_bridge" 2>/dev/null || true
+    pkill -INT -f "rf2o_laser_odometry" 2>/dev/null || true
     # Wait each separately so SIGKILL can be applied if needed
     wait "$SLAM_PID" 2>/dev/null || true
     wait "$BRIDGE_PID" 2>/dev/null || true
+    [ -n "$RF2O_PID" ] && wait "$RF2O_PID" 2>/dev/null || true
     [ -n "$FOXGLOVE_PID" ] && wait "$FOXGLOVE_PID" 2>/dev/null || true
     [ -n "$ROBOT_STATE_PUBLISHER_PID" ] && wait "$ROBOT_STATE_PUBLISHER_PID" 2>/dev/null || true
     [ -n "$VAC_MARKER_PID" ] && wait "$VAC_MARKER_PID" 2>/dev/null || true
@@ -421,17 +453,31 @@ while true; do
         python3 /eval/rosie_vac_marker.py > "$OUT/vac_marker.log" 2>&1 &
         VAC_MARKER_PID=$!
     fi
+    if [ -n "$RF2O_PID" ] && ! ps -p "$RF2O_PID" > /dev/null 2>&1; then
+        echo "!! rf2o DIED at t=${ELAPSED}s — restarting"
+        ros2 run rf2o_laser_odometry rf2o_laser_odometry_node \
+            --ros-args \
+            -p laser_scan_topic:=/scan \
+            -p odom_topic:=/odom \
+            -p base_frame_id:=base_link \
+            -p odom_frame_id:=odom \
+            -p publish_tf:=true \
+            -p freq:=10.0 \
+            >> "$OUT/rf2o.log" 2>&1 &
+        RF2O_PID=$!
+    fi
 
     # ---- heartbeat every HEARTBEAT seconds ----
     if [ $((ELAPSED % HEARTBEAT)) -eq 0 ]; then
         rss_slam=$(awk '/^VmRSS:/ {print $2}' /proc/$SLAM_PID/status 2>/dev/null || echo 0)
         rss_brg=$(awk '/^VmRSS:/ {print $2}' /proc/$BRIDGE_PID/status 2>/dev/null || echo 0)
+        rss_rf2o=$([ -n "$RF2O_PID" ] && awk '/^VmRSS:/ {print $2}' /proc/$RF2O_PID/status 2>/dev/null || echo 0)
         rss_fox=$([ -n "$FOXGLOVE_PID" ] && awk '/^VmRSS:/ {print $2}' /proc/$FOXGLOVE_PID/status 2>/dev/null || echo 0)
         rss_rsp=$([ -n "$ROBOT_STATE_PUBLISHER_PID" ] && awk '/^VmRSS:/ {print $2}' /proc/$ROBOT_STATE_PUBLISHER_PID/status 2>/dev/null || echo 0)
         rss_marker=$([ -n "$VAC_MARKER_PID" ] && awk '/^VmRSS:/ {print $2}' /proc/$VAC_MARKER_PID/status 2>/dev/null || echo 0)
         free_mb=$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo)
         swap_free=$(awk '/^SwapFree:/ {print int($2/1024)}' /proc/meminfo)
-        echo "t=${ELAPSED}s  slam=${rss_slam}KB  bridge=${rss_brg}KB  fox=${rss_fox}KB  rsp=${rss_rsp}KB  marker=${rss_marker}KB  avail=${free_mb}MB  swap_free=${swap_free}MB"
+        echo "t=${ELAPSED}s  slam=${rss_slam}KB  rf2o=${rss_rf2o}KB  bridge=${rss_brg}KB  fox=${rss_fox}KB  rsp=${rss_rsp}KB  marker=${rss_marker}KB  avail=${free_mb}MB  swap_free=${swap_free}MB"
     fi
 
     # ---- lifecycle: check if lifecycle_activate.py has succeeded ----
@@ -451,6 +497,8 @@ echo "--- final state ---"
 free -m
 echo "--- last 30 slam log ---"
 tail -30 "$OUT/slam.log" || true
+echo "--- last 30 rf2o log ---"
+[ -f "$OUT/rf2o.log" ] && tail -30 "$OUT/rf2o.log" || true
 echo "--- last 30 bridge log ---"
 tail -30 "$OUT/bridge.log" || true
 cleanup
