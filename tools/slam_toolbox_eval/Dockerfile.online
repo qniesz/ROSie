@@ -18,20 +18,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pil \
     && rm -rf /var/lib/apt/lists/*
 
-# rf2o_laser_odometry is not released for ROS 2 Jazzy (only Humble); build from source.
-# The Humble API is fully compatible with Jazzy for the packages rf2o uses.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        git \
-        python3-colcon-common-extensions \
-        libeigen3-dev \
-    && . /opt/ros/jazzy/setup.sh \
-    && mkdir -p /rf2o_ws/src \
-    && git clone --depth 1 https://github.com/MAPIRlab/rf2o_laser_odometry /rf2o_ws/src/rf2o_laser_odometry \
-    && cd /rf2o_ws \
-    && colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release \
-    && rm -rf /rf2o_ws/src /rf2o_ws/build /rf2o_ws/log \
-    && rm -rf /var/lib/apt/lists/*
-
 # CycloneDDS no-SHM config: disable shared memory and multicast so the
 # intra-container DDS traffic stays in loopback only.  Saves ~16 MB RSS.
 RUN mkdir -p /cfg && cat > /cfg/cyclonedds_no_shm.xml <<'XML'

@@ -61,7 +61,7 @@ slam_toolbox:
     loop_search_space_resolution: 0.05
     loop_search_space_smear_deviation: 0.03
     loop_search_maximum_distance: 3.0
-    loop_match_minimum_chain_size: 15
+    loop_match_minimum_chain_size: 10
     loop_match_maximum_variance_coarse: 0.4      # slam_toolbox default; 2.0 was 5x too loose and caused false-closure explosions
     loop_match_minimum_response_coarse: 0.60     # raised from 0.50: stricter coarse gate
     loop_match_minimum_response_fine: 0.70       # raised from 0.60: stricter fine gate

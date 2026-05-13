@@ -48,7 +48,7 @@ slam_toolbox:
     loop_search_space_resolution: 0.05
     loop_search_space_smear_deviation: 0.03
     loop_search_maximum_distance: 3.0
-    loop_match_minimum_chain_size: 15
+    loop_match_minimum_chain_size: 10
     loop_match_maximum_variance_coarse: 0.4   # 3.0 default → 0.4: much tighter; prevents false closure explosions
     loop_match_minimum_response_coarse: 0.60  # 0.35 → 0.60: stricter coarse gate (matching online)
     loop_match_minimum_response_fine: 0.70    # 0.45 → 0.70: stricter fine gate (matching online)
