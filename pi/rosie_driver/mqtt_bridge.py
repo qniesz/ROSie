@@ -209,7 +209,11 @@ class MQTTBridge:
                      stamp: float,
                      left_load: float = 0.0, right_load: float = 0.0,
                      left_rpm: float = 0.0, right_rpm: float = 0.0,
-                     stall: bool = False) -> None:
+                     stall: bool = False,
+                     slip: bool = False,
+                     accel_pitch: float = 0.0,
+                     accel_roll: float = 0.0,
+                     accel_sum_g: float = 1.0) -> None:
         self.publish("odom", {
             "x": x, "y": y, "theta": theta,
             "linear_vel": linear_vel, "angular_vel": angular_vel,
@@ -217,6 +221,10 @@ class MQTTBridge:
             "left_load": left_load, "right_load": right_load,
             "left_rpm": left_rpm, "right_rpm": right_rpm,
             "stall": stall,
+            "slip": slip,
+            "accel_pitch": round(accel_pitch, 2),
+            "accel_roll": round(accel_roll, 2),
+            "accel_sum_g": round(accel_sum_g, 3),
         })
 
     def publish_battery(self, fuel_percent: float, voltage: float,
@@ -577,6 +585,12 @@ class MQTTBridge:
              "{{ value_json.left_rpm | round(0) | int }}", "measurement"),
             ("right_wheel_rpm", "Right Wheel RPM", "RPM", None, f"{pfx}/odom",
              "{{ value_json.right_rpm | round(0) | int }}", "measurement"),
+            ("accel_pitch", "Accel Pitch", "\u00b0", None, f"{pfx}/odom",
+             "{{ value_json.accel_pitch }}", "measurement"),
+            ("accel_roll", "Accel Roll", "\u00b0", None, f"{pfx}/odom",
+             "{{ value_json.accel_roll }}", "measurement"),
+            ("accel_sum_g", "Accel Total G", "g", None, f"{pfx}/odom",
+             "{{ value_json.accel_sum_g }}", "measurement"),
         ]
         for s_id, label, unit, dev_class, topic, tmpl, state_class in sensors:
             cfg = {
@@ -592,7 +606,8 @@ class MQTTBridge:
             if state_class:
                 cfg["state_class"] = state_class
             if s_id in ("battery_voltage", "battery_temp", "nogo_status", "nogo_message",
-                        "left_wheel_load", "right_wheel_load", "left_wheel_rpm", "right_wheel_rpm"):
+                        "left_wheel_load", "right_wheel_load", "left_wheel_rpm", "right_wheel_rpm",
+                        "accel_pitch", "accel_roll", "accel_sum_g"):
                 cfg["entity_category"] = "diagnostic"
             if s_id == "nogo_line_count":
                 # Expose full lines array as entity attributes so the HA
@@ -608,9 +623,11 @@ class MQTTBridge:
              "{{ 'ON' if value_json.ext_power else 'OFF' }}"),
             ("wheel_stall", "Wheel Stall", "problem", f"{pfx}/odom",
              "{{ 'ON' if value_json.stall else 'OFF' }}"),
+            ("wheel_slip", "Wheel Slip", "problem", f"{pfx}/odom",
+             "{{ 'ON' if value_json.slip else 'OFF' }}"),
         ]
         for bs_id, label, dev_class, topic, tmpl in bin_sensors:
-            self._pub_discovery("binary_sensor", bs_id, {
+            cfg = {
                 "name": label,
                 "unique_id": f"{pfx}_{bs_id}",
                 "state_topic": topic,
@@ -618,7 +635,10 @@ class MQTTBridge:
                 "payload_on": "ON",
                 "payload_off": "OFF",
                 "device_class": dev_class,
-            })
+            }
+            if bs_id in ("wheel_stall", "wheel_slip"):
+                cfg["entity_category"] = "diagnostic"
+            self._pub_discovery("binary_sensor", bs_id, cfg)
 
         # --- Binary sensors: physical bump switches ---
         bumper_sensors = [

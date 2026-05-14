@@ -26,6 +26,16 @@ BASE_WIDTH_M = BASE_WIDTH_MM / 1000.0
 STALL_LOAD_THRESHOLD = int(os.environ.get("STALL_LOAD_THRESHOLD", "75"))
 STALL_MIN_FRAMES     = int(os.environ.get("STALL_MIN_FRAMES",     "2"))
 
+# Slip detection: wheels spinning freely (high RPM + low load = no traction).
+# Opposite of stall — wheels turn fast because there is nothing to push against.
+SLIP_RPM_THRESHOLD  = int(os.environ.get("SLIP_RPM_THRESHOLD",  "30"))
+SLIP_LOAD_THRESHOLD = int(os.environ.get("SLIP_LOAD_THRESHOLD", "20"))
+SLIP_MIN_FRAMES     = int(os.environ.get("SLIP_MIN_FRAMES",     "3"))
+
+# Tilt suppression: if the robot is pitched/rolled beyond this angle the
+# kinematic model is unreliable (climbing a rug edge, wedged on furniture).
+TILT_THRESHOLD_DEG  = float(os.environ.get("TILT_THRESHOLD_DEG", "8.0"))
+
 # Motor status fields returned by GetMotors (in order)
 MOTOR_FIELDS = [
     "Brush_RPM", "Brush_mA",
@@ -56,11 +66,32 @@ class OdomState:
     stall_active: bool = False
     _stall_count: int = 0
 
+    # Slip state — True when high RPM + low load indicates free spinning
+    slip_active: bool = False
+    _slip_count: int = 0
+
+    # Tilt state — True when accelerometer reports robot is pitched/rolled
+    tilt_active: bool = False
+
+    # Latest accelerometer readings (for MQTT publish)
+    accel_pitch: float = 0.0
+    accel_roll: float = 0.0
+    accel_sum_g: float = 1.0
+
     # Previous encoder values
     _prev_left_mm: float = 0.0
     _prev_right_mm: float = 0.0
     _prev_time: float = 0.0
     _initialized: bool = False
+
+
+@dataclass
+class AccelState:
+    """Accelerometer/tilt reading from GetAccel."""
+    pitch_deg: float = 0.0
+    roll_deg: float = 0.0
+    sum_g: float = 1.0
+    timestamp: float = 0.0
 
 
 def get_motors(serial: NeatoSerial) -> dict[str, float]:
@@ -81,7 +112,33 @@ def get_motors(serial: NeatoSerial) -> dict[str, float]:
     return state
 
 
-def update_odometry(odom: OdomState, motor_state: dict[str, float]) -> OdomState:
+def get_accel(serial: NeatoSerial) -> "AccelState | None":
+    """
+    Read accelerometer / tilt data via GetAccel.
+
+    Returns an AccelState, or None if the command fails or returns no data.
+    """
+    lines = serial.send_and_collect("GetAccel", "Label", timeout=1.0)
+    parsed: dict[str, float] = {}
+    for line in lines:
+        parts = line.split(",")
+        if len(parts) >= 2:
+            try:
+                parsed[parts[0].strip()] = float(parts[1].strip())
+            except ValueError:
+                continue
+    if not parsed:
+        return None
+    return AccelState(
+        pitch_deg=parsed.get("PitchInDegrees", 0.0),
+        roll_deg=parsed.get("RollInDegrees", 0.0),
+        sum_g=parsed.get("SumInG", 1.0),
+        timestamp=time.monotonic(),
+    )
+
+
+def update_odometry(odom: OdomState, motor_state: dict[str, float],
+                    accel: "AccelState | None" = None) -> OdomState:
     """
     Update odometry from new motor encoder readings.
 
@@ -101,11 +158,13 @@ def update_odometry(odom: OdomState, motor_state: dict[str, float]) -> OdomState
         odom.timestamp = now
         return odom
 
-    # Stall detection: bilateral high load means wheels are straining against
-    # a physical obstruction (e.g. LDS turret jammed on cart underside).
-    # Read loads early so we can gate encoder deltas before kinematics.
+    # Read loads and RPMs early — needed for both stall and slip detection.
     _left_load  = motor_state.get("LeftWheel_Load",  0.0)
     _right_load = motor_state.get("RightWheel_Load", 0.0)
+    _left_rpm   = motor_state.get("LeftWheel_RPM",   0.0)
+    _right_rpm  = motor_state.get("RightWheel_RPM",  0.0)
+
+    # --- Stall detection (bilateral high load = physically jammed) ---
     if _left_load > STALL_LOAD_THRESHOLD and _right_load > STALL_LOAD_THRESHOLD:
         odom._stall_count += 1
     else:
@@ -120,6 +179,46 @@ def update_odometry(odom: OdomState, motor_state: dict[str, float]) -> OdomState
         logger.info("stall cleared")
     odom.stall_active = _stall
 
+    # --- Slip detection (high RPM + low load = spinning freely, no traction) ---
+    _left_slip  = abs(_left_rpm)  > SLIP_RPM_THRESHOLD and _left_load  < SLIP_LOAD_THRESHOLD
+    _right_slip = abs(_right_rpm) > SLIP_RPM_THRESHOLD and _right_load < SLIP_LOAD_THRESHOLD
+    if _left_slip or _right_slip:
+        odom._slip_count += 1
+    else:
+        odom._slip_count = 0
+    _slip = odom._slip_count >= SLIP_MIN_FRAMES
+    if _slip and not odom.slip_active:
+        logger.warning(
+            "slip detected: left=%.0frpm/%.0f%% right=%.0frpm/%.0f%% — "
+            "zeroing encoder deltas",
+            _left_rpm, _left_load, _right_rpm, _right_load,
+        )
+    elif not _slip and odom.slip_active:
+        logger.info("slip cleared")
+    odom.slip_active = _slip
+
+    # --- Tilt suppression (accelerometer: robot climbing rug or wedged) ---
+    _tilt = False
+    if accel is not None:
+        _tilt = (
+            abs(accel.pitch_deg) > TILT_THRESHOLD_DEG
+            or abs(accel.roll_deg) > TILT_THRESHOLD_DEG
+        )
+        if _tilt and not odom.tilt_active:
+            logger.warning(
+                "tilt detected: pitch=%.1f\u00b0 roll=%.1f\u00b0 — "
+                "zeroing encoder deltas",
+                accel.pitch_deg, accel.roll_deg,
+            )
+        elif not _tilt and odom.tilt_active:
+            logger.info("tilt cleared")
+        odom.tilt_active = _tilt
+        odom.accel_pitch = accel.pitch_deg
+        odom.accel_roll  = accel.roll_deg
+        odom.accel_sum_g = accel.sum_g
+    else:
+        odom.tilt_active = False
+
     # Compute deltas
     d_left = (left_mm - odom._prev_left_mm) / 1000.0   # mm -> m
     d_right = (right_mm - odom._prev_right_mm) / 1000.0
@@ -128,11 +227,10 @@ def update_odometry(odom: OdomState, motor_state: dict[str, float]) -> OdomState
     if dt <= 0:
         return odom
 
-    # During a stall the wheels are spinning without real displacement.
-    # Zero the deltas so position doesn't drift; _prev_mm is still advanced
-    # below so stall-period counts are consumed and won't appear as a jump
-    # on recovery.
-    if _stall:
+    # Zero encoder deltas when stalled, slipping, or tilted — in all cases the
+    # reported displacement is phantom.  _prev_mm is still advanced so the
+    # accumulated counts are consumed and won't jump on recovery.
+    if _stall or _slip or _tilt:
         d_left = 0.0
         d_right = 0.0
 
@@ -157,8 +255,8 @@ def update_odometry(odom: OdomState, motor_state: dict[str, float]) -> OdomState
     # Store for next iteration
     odom.left_load  = _left_load
     odom.right_load = _right_load
-    odom.left_rpm   = motor_state.get("LeftWheel_RPM",   0.0)
-    odom.right_rpm  = motor_state.get("RightWheel_RPM",  0.0)
+    odom.left_rpm   = _left_rpm
+    odom.right_rpm  = _right_rpm
     odom._prev_left_mm = left_mm
     odom._prev_right_mm = right_mm
     odom._prev_time = now

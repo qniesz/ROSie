@@ -26,7 +26,7 @@ import time
 
 from .serial_handler import NeatoSerial
 from .lidar import get_lidar_scan
-from .odometry import OdomState, get_motors, update_odometry
+from .odometry import OdomState, AccelState, get_motors, get_accel, update_odometry
 from .sensors import get_battery, get_bumpers, get_robot_state, get_user_settings, get_version, format_model, format_firmware
 from .commands import handle_command, handle_cmd_vel
 from .mqtt_bridge import MQTTBridge
@@ -44,6 +44,7 @@ logger = logging.getLogger("rosie")
 
 # Timing intervals (seconds)
 SCAN_INTERVAL     = 0.22     # ~4.5 Hz (active mode only) ? widened from 0.20 to give GetMotors better interleave windows
+ACCEL_INTERVAL    = 0.5      # 2 Hz ? accelerometer/tilt polling (cheap, serial-shared with motor loop)
 STATE_INTERVAL    = 10.0    # ~0.1 Hz ? poll GetErr + GetState
 CHARGER_INTERVAL  = 10.0  # ~0.1 Hz ? poll GetCharger
 SETTINGS_INTERVAL = 60.0 # ~once per minute ? poll GetUserSettings
@@ -956,6 +957,7 @@ def main() -> None:
     # Main loop
     # ------------------------------------------------------------------
     odom = OdomState()
+    latest_accel: AccelState = AccelState()
     last_scan     = 0.0
     last_state    = 0.0
     last_charger  = 0.0
@@ -963,6 +965,7 @@ def main() -> None:
     last_bumpers  = 0.0
     last_nogo_pub = 0.0
     last_serial_stats = 0.0
+    last_accel    = 0.0
     BUMPER_INTERVAL = 1.0   # poll bumpers via serial every 1s
     NOGO_PUB_INTERVAL = 1.0 / NOGO_DEBUG_PUBLISH_HZ
     was_scan_active = False  # track transitions to reset odom
@@ -1117,6 +1120,16 @@ def main() -> None:
                 odom = OdomState()
             was_scan_active = scan_active
 
+            # --- Accelerometer / tilt (2 Hz, active mode only) ---
+            if scan_active and now - last_accel >= ACCEL_INTERVAL:
+                last_accel = now
+                try:
+                    a = get_accel(serial)
+                    if a is not None:
+                        latest_accel = a
+                except Exception:
+                    logger.debug("Accel poll failed", exc_info=True)
+
             # --- Odometry + no-go guard: run every loop, not just when scan_active ---
             # GetMotors is a fast serial call (~20ms). Running it every iteration
             # gives ~10 Hz position updates ? enough to catch the robot mid-move.
@@ -1127,7 +1140,8 @@ def main() -> None:
                     _latest_motors["motors"] = motors
                     serial_fail_count = 0
                     if robot_cleaning_or_manual:
-                        odom = update_odometry(odom, motors)
+                        odom = update_odometry(odom, motors,
+                                               accel=latest_accel if scan_active else None)
                         mqtt.publish_odom(
                             x=odom.x, y=odom.y, theta=odom.theta,
                             linear_vel=odom.linear_vel,
@@ -1138,6 +1152,10 @@ def main() -> None:
                             left_rpm=odom.left_rpm,
                             right_rpm=odom.right_rpm,
                             stall=odom.stall_active,
+                            slip=odom.slip_active,
+                            accel_pitch=odom.accel_pitch,
+                            accel_roll=odom.accel_roll,
+                            accel_sum_g=odom.accel_sum_g,
                         )
                         if pipeline is not None:
                             pipeline.on_odom(odom)
@@ -1203,7 +1221,7 @@ def main() -> None:
                         motors2 = get_motors(serial)
                         if motors2:
                             _latest_motors["motors"] = motors2
-                            odom = update_odometry(odom, motors2)
+                            odom = update_odometry(odom, motors2, accel=latest_accel)
                             _latest_odom["odom"] = odom
                             gx, gy, gtheta, gsource = _get_guard_pose(odom)
                             no_go_guard.check(
