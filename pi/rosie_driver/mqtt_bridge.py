@@ -569,6 +569,14 @@ class MQTTBridge:
              "{{ value_json.vacuum_rpm }}", "measurement"),
             ("vacuum_current", "Vacuum Current", "mA", None, f"{pfx}/vacuum_state",
              "{{ value_json.vacuum_ma }}", "measurement"),
+            ("left_wheel_load", "Left Wheel Load", "%", None, f"{pfx}/odom",
+             "{{ value_json.left_load | round(0) | int }}", "measurement"),
+            ("right_wheel_load", "Right Wheel Load", "%", None, f"{pfx}/odom",
+             "{{ value_json.right_load | round(0) | int }}", "measurement"),
+            ("left_wheel_rpm", "Left Wheel RPM", "RPM", None, f"{pfx}/odom",
+             "{{ value_json.left_rpm | round(0) | int }}", "measurement"),
+            ("right_wheel_rpm", "Right Wheel RPM", "RPM", None, f"{pfx}/odom",
+             "{{ value_json.right_rpm | round(0) | int }}", "measurement"),
         ]
         for s_id, label, unit, dev_class, topic, tmpl, state_class in sensors:
             cfg = {
@@ -583,7 +591,8 @@ class MQTTBridge:
                 cfg["device_class"] = dev_class
             if state_class:
                 cfg["state_class"] = state_class
-            if s_id in ("battery_voltage", "battery_temp", "nogo_status", "nogo_message"):
+            if s_id in ("battery_voltage", "battery_temp", "nogo_status", "nogo_message",
+                        "left_wheel_load", "right_wheel_load", "left_wheel_rpm", "right_wheel_rpm"):
                 cfg["entity_category"] = "diagnostic"
             if s_id == "nogo_line_count":
                 # Expose full lines array as entity attributes so the HA
@@ -597,6 +606,8 @@ class MQTTBridge:
              "{{ 'ON' if value_json.charging else 'OFF' }}"),
             ("ext_power", "Docked", "plug", f"{pfx}/battery",
              "{{ 'ON' if value_json.ext_power else 'OFF' }}"),
+            ("wheel_stall", "Wheel Stall", "problem", f"{pfx}/odom",
+             "{{ 'ON' if value_json.stall else 'OFF' }}"),
         ]
         for bs_id, label, dev_class, topic, tmpl in bin_sensors:
             self._pub_discovery("binary_sensor", bs_id, {

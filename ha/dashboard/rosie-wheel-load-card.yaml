@@ -1,0 +1,91 @@
+# ROSie Wheel Load / Slip Monitor Card for Home Assistant
+#
+# Shows real-time left/right wheel motor load (%) and RPM so you can
+# observe what happens when the robot gets stuck on something and the
+# wheels start spinning.
+#
+# Wheel slip signatures:
+#   - Spinning freely: RPM high, Load LOW (< ~20%) — no mechanical resistance
+#   - Jammed against wall: RPM ~0, Load HIGH (> ~75%) — bilateral stall
+#   - One-side stuck: asymmetric loads (|left - right| > 40%)
+#
+# Setup:
+#   1. Deploy the updated mqtt_bridge.py to the Pi (adds 4 sensor +
+#      1 binary_sensor HA discovery entities for wheel telemetry).
+#   2. Restart rosie.service on the Pi so discovery is re-published.
+#   3. Add this card YAML to a Lovelace dashboard.
+#
+# Entity IDs (auto-created by MQTT Discovery, prefix may vary):
+#   sensor.rosie_left_wheel_load
+#   sensor.rosie_right_wheel_load
+#   sensor.rosie_left_wheel_rpm
+#   sensor.rosie_right_wheel_rpm
+#   binary_sensor.rosie_wheel_stall
+
+type: vertical-stack
+cards:
+  - type: markdown
+    content: "## 🛞 Wheel Load Monitor"
+
+  - type: horizontal-stack
+    cards:
+      - type: gauge
+        entity: sensor.rosie_left_wheel_load
+        name: Left Load
+        unit: "%"
+        min: 0
+        max: 100
+        needle: true
+        severity:
+          green: 0
+          yellow: 50
+          red: 75
+
+      - type: gauge
+        entity: sensor.rosie_right_wheel_load
+        name: Right Load
+        unit: "%"
+        min: 0
+        max: 100
+        needle: true
+        severity:
+          green: 0
+          yellow: 50
+          red: 75
+
+  - type: horizontal-stack
+    cards:
+      - type: sensor
+        entity: sensor.rosie_left_wheel_rpm
+        name: Left RPM
+        icon: mdi:rotate-left
+
+      - type: sensor
+        entity: sensor.rosie_right_wheel_rpm
+        name: Right RPM
+        icon: mdi:rotate-right
+
+  - type: entity
+    entity: binary_sensor.rosie_wheel_stall
+    name: Wheel Stall (bilateral high load)
+    icon: mdi:alert-circle
+
+  - type: history-graph
+    title: Wheel Load History
+    hours_to_show: 0.5
+    refresh_interval: 5
+    entities:
+      - entity: sensor.rosie_left_wheel_load
+        name: Left Load %
+      - entity: sensor.rosie_right_wheel_load
+        name: Right Load %
+
+  - type: history-graph
+    title: Wheel RPM History
+    hours_to_show: 0.5
+    refresh_interval: 5
+    entities:
+      - entity: sensor.rosie_left_wheel_rpm
+        name: Left RPM
+      - entity: sensor.rosie_right_wheel_rpm
+        name: Right RPM
