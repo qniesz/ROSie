@@ -45,6 +45,7 @@ logger = logging.getLogger("rosie")
 # Timing intervals (seconds)
 SCAN_INTERVAL     = 0.22     # ~4.5 Hz (active mode only) ? widened from 0.20 to give GetMotors better interleave windows
 ACCEL_INTERVAL    = 0.5      # 2 Hz ? accelerometer/tilt polling (cheap, serial-shared with motor loop)
+WHEEL_STATUS_INTERVAL = 1.0  # 1 Hz ? low-rate HA diagnostic publish (bridged to HA)
 STATE_INTERVAL    = 10.0    # ~0.1 Hz ? poll GetErr + GetState
 CHARGER_INTERVAL  = 10.0  # ~0.1 Hz ? poll GetCharger
 SETTINGS_INTERVAL = 60.0 # ~once per minute ? poll GetUserSettings
@@ -966,6 +967,7 @@ def main() -> None:
     last_nogo_pub = 0.0
     last_serial_stats = 0.0
     last_accel    = 0.0
+    last_wheel_status = 0.0
     BUMPER_INTERVAL = 1.0   # poll bumpers via serial every 1s
     NOGO_PUB_INTERVAL = 1.0 / NOGO_DEBUG_PUBLISH_HZ
     was_scan_active = False  # track transitions to reset odom
@@ -1157,6 +1159,20 @@ def main() -> None:
                             accel_roll=odom.accel_roll,
                             accel_sum_g=odom.accel_sum_g,
                         )
+                        # 1 Hz bridged diagnostic for HA sensors
+                        if now - last_wheel_status >= WHEEL_STATUS_INTERVAL:
+                            last_wheel_status = now
+                            mqtt.publish_wheel_status(
+                                left_load=odom.left_load,
+                                right_load=odom.right_load,
+                                left_rpm=odom.left_rpm,
+                                right_rpm=odom.right_rpm,
+                                stall=odom.stall_active,
+                                slip=odom.slip_active,
+                                accel_pitch=odom.accel_pitch,
+                                accel_roll=odom.accel_roll,
+                                accel_sum_g=odom.accel_sum_g,
+                            )
                         if pipeline is not None:
                             pipeline.on_odom(odom)
                             # Forward latest external slam_toolbox pose into

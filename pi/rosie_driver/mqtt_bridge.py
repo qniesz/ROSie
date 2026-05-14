@@ -227,6 +227,26 @@ class MQTTBridge:
             "accel_sum_g": round(accel_sum_g, 3),
         })
 
+    def publish_wheel_status(self,
+                             left_load: float = 0.0, right_load: float = 0.0,
+                             left_rpm: float = 0.0, right_rpm: float = 0.0,
+                             stall: bool = False, slip: bool = False,
+                             accel_pitch: float = 0.0,
+                             accel_roll: float = 0.0,
+                             accel_sum_g: float = 1.0) -> None:
+        """Publish wheel/accel diagnostics at ~1 Hz for HA consumption."""
+        self.publish("wheel_status", {
+            "left_load":   round(left_load,  1),
+            "right_load":  round(right_load, 1),
+            "left_rpm":    round(left_rpm,   0),
+            "right_rpm":   round(right_rpm,  0),
+            "stall":       stall,
+            "slip":        slip,
+            "accel_pitch": round(accel_pitch, 2),
+            "accel_roll":  round(accel_roll,  2),
+            "accel_sum_g": round(accel_sum_g, 3),
+        }, qos=0, retain=True)
+
     def publish_battery(self, fuel_percent: float, voltage: float,
                         charging: bool, ext_power: bool,
                         temperature: float) -> None:
@@ -577,19 +597,19 @@ class MQTTBridge:
              "{{ value_json.vacuum_rpm }}", "measurement"),
             ("vacuum_current", "Vacuum Current", "mA", None, f"{pfx}/vacuum_state",
              "{{ value_json.vacuum_ma }}", "measurement"),
-            ("left_wheel_load", "Left Wheel Load", "%", None, f"{pfx}/odom",
+            ("left_wheel_load", "Left Wheel Load", "%", None, f"{pfx}/wheel_status",
              "{{ value_json.left_load | round(0) | int }}", "measurement"),
-            ("right_wheel_load", "Right Wheel Load", "%", None, f"{pfx}/odom",
+            ("right_wheel_load", "Right Wheel Load", "%", None, f"{pfx}/wheel_status",
              "{{ value_json.right_load | round(0) | int }}", "measurement"),
-            ("left_wheel_rpm", "Left Wheel RPM", "RPM", None, f"{pfx}/odom",
+            ("left_wheel_rpm", "Left Wheel RPM", "RPM", None, f"{pfx}/wheel_status",
              "{{ value_json.left_rpm | round(0) | int }}", "measurement"),
-            ("right_wheel_rpm", "Right Wheel RPM", "RPM", None, f"{pfx}/odom",
+            ("right_wheel_rpm", "Right Wheel RPM", "RPM", None, f"{pfx}/wheel_status",
              "{{ value_json.right_rpm | round(0) | int }}", "measurement"),
-            ("accel_pitch", "Accel Pitch", "\u00b0", None, f"{pfx}/odom",
+            ("accel_pitch", "Accel Pitch", "\u00b0", None, f"{pfx}/wheel_status",
              "{{ value_json.accel_pitch }}", "measurement"),
-            ("accel_roll", "Accel Roll", "\u00b0", None, f"{pfx}/odom",
+            ("accel_roll", "Accel Roll", "\u00b0", None, f"{pfx}/wheel_status",
              "{{ value_json.accel_roll }}", "measurement"),
-            ("accel_sum_g", "Accel Total G", "g", None, f"{pfx}/odom",
+            ("accel_sum_g", "Accel Total G", "g", None, f"{pfx}/wheel_status",
              "{{ value_json.accel_sum_g }}", "measurement"),
         ]
         for s_id, label, unit, dev_class, topic, tmpl, state_class in sensors:
@@ -621,9 +641,9 @@ class MQTTBridge:
              "{{ 'ON' if value_json.charging else 'OFF' }}"),
             ("ext_power", "Docked", "plug", f"{pfx}/battery",
              "{{ 'ON' if value_json.ext_power else 'OFF' }}"),
-            ("wheel_stall", "Wheel Stall", "problem", f"{pfx}/odom",
+            ("wheel_stall", "Wheel Stall", "problem", f"{pfx}/wheel_status",
              "{{ 'ON' if value_json.stall else 'OFF' }}"),
-            ("wheel_slip", "Wheel Slip", "problem", f"{pfx}/odom",
+            ("wheel_slip", "Wheel Slip", "problem", f"{pfx}/wheel_status",
              "{{ 'ON' if value_json.slip else 'OFF' }}"),
         ]
         for bs_id, label, dev_class, topic, tmpl in bin_sensors:

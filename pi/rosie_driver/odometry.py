@@ -159,8 +159,9 @@ def update_odometry(odom: OdomState, motor_state: dict[str, float],
         return odom
 
     # Read loads and RPMs early — needed for both stall and slip detection.
-    _left_load  = motor_state.get("LeftWheel_Load",  0.0)
-    _right_load = motor_state.get("RightWheel_Load", 0.0)
+    # NOTE: The Neato reports this field as "LeftWheel_Load%" (with the % sign).
+    _left_load  = motor_state.get("LeftWheel_Load%",  0.0)
+    _right_load = motor_state.get("RightWheel_Load%", 0.0)
     _left_rpm   = motor_state.get("LeftWheel_RPM",   0.0)
     _right_rpm  = motor_state.get("RightWheel_RPM",  0.0)
 
@@ -180,9 +181,11 @@ def update_odometry(odom: OdomState, motor_state: dict[str, float],
     odom.stall_active = _stall
 
     # --- Slip detection (high RPM + low load = spinning freely, no traction) ---
+    # Both wheels must show free-spin simultaneously: during a normal turn one
+    # wheel is loaded while the other is light, so OR would false-positive.
     _left_slip  = abs(_left_rpm)  > SLIP_RPM_THRESHOLD and _left_load  < SLIP_LOAD_THRESHOLD
     _right_slip = abs(_right_rpm) > SLIP_RPM_THRESHOLD and _right_load < SLIP_LOAD_THRESHOLD
-    if _left_slip or _right_slip:
+    if _left_slip and _right_slip:
         odom._slip_count += 1
     else:
         odom._slip_count = 0
@@ -226,13 +229,6 @@ def update_odometry(odom: OdomState, motor_state: dict[str, float],
 
     if dt <= 0:
         return odom
-
-    # Zero encoder deltas when stalled, slipping, or tilted — in all cases the
-    # reported displacement is phantom.  _prev_mm is still advanced so the
-    # accumulated counts are consumed and won't jump on recovery.
-    if _stall or _slip or _tilt:
-        d_left = 0.0
-        d_right = 0.0
 
     # Differential drive kinematics
     d_center = (d_left + d_right) / 2.0
