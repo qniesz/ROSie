@@ -232,6 +232,7 @@ if [ "${ROSIE_FOXGLOVE:-0}" = "1" ]; then
     ros2 run foxglove_bridge foxglove_bridge \
         --ros-args -p port:=8765 -p address:=0.0.0.0 \
         -p topic_whitelist:="$FOXGLOVE_TOPIC_WHITELIST" \
+        -p max_qos_depth:=500 \
         > "$OUT/foxglove.log" 2>&1 &
     FOXGLOVE_PID=$!
 

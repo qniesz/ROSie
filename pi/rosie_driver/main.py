@@ -1133,6 +1133,11 @@ def main() -> None:
                             linear_vel=odom.linear_vel,
                             angular_vel=odom.angular_vel,
                             stamp=odom.timestamp,
+                            left_load=odom.left_load,
+                            right_load=odom.right_load,
+                            left_rpm=odom.left_rpm,
+                            right_rpm=odom.right_rpm,
+                            stall=odom.stall_active,
                         )
                         if pipeline is not None:
                             pipeline.on_odom(odom)

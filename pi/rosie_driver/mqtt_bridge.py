@@ -206,11 +206,17 @@ class MQTTBridge:
 
     def publish_odom(self, x: float, y: float, theta: float,
                      linear_vel: float, angular_vel: float,
-                     stamp: float) -> None:
+                     stamp: float,
+                     left_load: float = 0.0, right_load: float = 0.0,
+                     left_rpm: float = 0.0, right_rpm: float = 0.0,
+                     stall: bool = False) -> None:
         self.publish("odom", {
             "x": x, "y": y, "theta": theta,
             "linear_vel": linear_vel, "angular_vel": angular_vel,
             "stamp": stamp,
+            "left_load": left_load, "right_load": right_load,
+            "left_rpm": left_rpm, "right_rpm": right_rpm,
+            "stall": stall,
         })
 
     def publish_battery(self, fuel_percent: float, voltage: float,
