@@ -95,27 +95,28 @@ def set_touch_callback(fn: Optional[Callable[[str, bool, bool], None]]) -> None:
 # ---------------------------------------------------------------------------
 def _line_distance(x: float, y: float, p1: tuple[float, float],
                    p2: tuple[float, float]) -> float:
-    """Perpendicular distance from point (x, y) to an INFINITE line."""
+    """Shortest distance from point (x, y) to line SEGMENT p1-p2."""
     x1, y1 = p1
     x2, y2 = p2
     dx = x2 - x1
     dy = y2 - y1
-    length = math.hypot(dx, dy)
-    if length == 0.0:
+    length_sq = dx * dx + dy * dy
+    if length_sq == 0.0:
         return math.hypot(x - x1, y - y1)
-    return abs(dy * (x - x1) - dx * (y - y1)) / length
+    t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / length_sq))
+    return math.hypot(x - (x1 + t * dx), y - (y1 + t * dy))
 
 
 def _foot_vector(x: float, y: float, p1: tuple[float, float],
                  p2: tuple[float, float]) -> tuple[float, float]:
-    """Vector from (x, y) to the foot of the perpendicular on line p1-p2."""
+    """Vector from (x, y) to the nearest point on segment p1-p2."""
     x1, y1 = p1
     x2, y2 = p2
     dx = x2 - x1
     dy = y2 - y1
     length_sq = dx * dx + dy * dy
     if length_sq > 1e-12:
-        t = ((x - x1) * dx + (y - y1) * dy) / length_sq
+        t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / length_sq))
         return (x1 + t * dx - x, y1 + t * dy - y)
     return (x1 - x, y1 - y)
 

@@ -151,6 +151,7 @@ class MapPipeline:
         # ── Pipeline state ────────────────────────────────────────────────
         self._status = IDLE
         self._pipeline_lock = threading.Lock()
+        self._slam_started_this_session: bool = False  # True once we start slam_online ourselves
 
         # ── Robot state (updated via on_state / on_odom) ──────────────────
         self._ui_state: str = ""
@@ -830,6 +831,7 @@ class MapPipeline:
 
         res = _slam_resources()
         logger.info("slam_toolbox upgrade: board resources: %s", res)
+        self._SLAM_MAPS_HOST.mkdir(parents=True, exist_ok=True)
         cmd = [
             "docker", "run", "--rm",
             "--name", "rosie_slam_eval",
@@ -837,6 +839,7 @@ class MapPipeline:
             "--memory-swap", res["swap"],
             "-v", f"{jsonl_path}:/data/scan.jsonl:ro",
             "-v", f"{out_dir}:/out",
+            "-v", f"{self._SLAM_MAPS_HOST}:/slam_maps",
         ]
         if params_path.is_file():
             cmd += ["-v", f"{params_path}:/eval/slam_params.yaml:ro"]
@@ -988,8 +991,24 @@ class MapPipeline:
                 capture_output=True, text=True, timeout=10, check=False,
             )
             if self._SLAM_CONTAINER in res.stdout:
-                return   # already running and (presumably) active
+                if self._slam_started_this_session:
+                    return   # we started it this session — still loaded the right posegraph
+                # Stale container survived a service restart; stop it so the
+                # fresh start loads the current posegraph from disk.
+                logger.info(
+                    "slam_online container is stale (pre-restart) — stopping to reload posegraph"
+                )
+                self._publish_slam_status("restarting", "replacing stale container")
+                try:
+                    subprocess.run(
+                        ["docker", "stop", self._SLAM_CONTAINER],
+                        capture_output=True, timeout=30, check=False,
+                    )
+                except Exception:
+                    pass
+                # fall through to start fresh
             logger.info("slam_online container not running — starting it")
+            self._publish_slam_status("starting")
             self._SLAM_MAPS_HOST.mkdir(parents=True, exist_ok=True)
             self._SLAM_OUT_HOST.mkdir(parents=True, exist_ok=True)
 
@@ -1026,6 +1045,7 @@ class MapPipeline:
                     self._SLAM_IMAGE,
                 ],
             )
+            self._slam_started_this_session = True
 
             # Wait for lifecycle_activate.py to confirm slam_toolbox is active
             # and has seeded the initial pose at the dock before the robot moves.
@@ -1036,17 +1056,21 @@ class MapPipeline:
                     txt = status_file.read_text().strip().lower()
                     if txt == "active":
                         logger.info("slam_online lifecycle is active — proceeding with clean")
+                        self._publish_slam_status("active")
                         return
                     if txt.startswith("failed"):
                         logger.warning("slam_online lifecycle failed: %s", txt)
+                        self._publish_slam_status("failed", txt)
                         return
                 except FileNotFoundError:
                     pass
                 time.sleep(2)
             logger.warning("slam_online did not become active within 120 s — proceeding anyway")
+            self._publish_slam_status("timeout", "lifecycle did not confirm active within 120 s")
 
         except Exception:
             logger.warning("ensure_online_slam failed", exc_info=True)
+            self._publish_slam_status("error", "ensure_online_slam exception")
 
     def _start_mapping_slam(self) -> None:
         """Start slam_online in MAPPING mode (no posegraph).
@@ -1399,6 +1423,15 @@ class MapPipeline:
                 pass
             return None
 
+    def _publish_slam_status(self, status: str, detail: str = "") -> None:
+        """Publish slam_online container state to rosie/slam/status."""
+        self._mqtt.publish(
+            "slam/status",
+            {"status": status, "detail": detail},
+            qos=1, retain=True,
+        )
+        logger.info("SLAM container: %s %s", status, detail)
+
     def _publish_status(self, status: str, detail: str = "") -> None:
         self._status = status
         self._save_pipeline_state(status)
@@ -1511,6 +1544,16 @@ class MapPipeline:
             "value_template": "{{ value_json.detail if value_json.detail else value_json.status }}",
             "json_attributes_topic": f"{pfx}/map_pipeline/status",
             "icon": "mdi:map-clock",
+        })
+
+        # Sensor: SLAM Container Status
+        self._pub_discovery("sensor", "slam_status", {
+            "name": "SLAM",
+            "state_topic": f"{pfx}/slam/status",
+            "value_template": "{{ value_json.status }}",
+            "json_attributes_topic": f"{pfx}/slam/status",
+            "icon": "mdi:map-marker-path",
+            "entity_category": "diagnostic",
         })
 
         # Camera: Map Image

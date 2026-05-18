@@ -230,6 +230,17 @@ def update_odometry(odom: OdomState, motor_state: dict[str, float],
     if dt <= 0:
         return odom
 
+    # Zero encoder deltas when wheels are spinning freely (no traction).
+    if _slip:
+        d_left = 0.0
+        d_right = 0.0
+
+    # Zero encoder deltas when both wheels are reversing — bounce-back motion
+    # creates phantom odometry that corrupts the map.
+    if d_left < 0.0 and d_right < 0.0:
+        d_left = 0.0
+        d_right = 0.0
+
     # Differential drive kinematics
     d_center = (d_left + d_right) / 2.0
     d_theta = (d_right - d_left) / BASE_WIDTH_M

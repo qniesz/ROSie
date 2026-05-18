@@ -131,6 +131,14 @@ def main() -> None:
             and args.slam_mode == "localization"
             and _HAS_GEOM):
         x, y, theta = args.seed_pose
+        # slam_toolbox returns the activate service response before its internal
+        # /initialpose subscriber is ready.  Wait for it to fully initialize
+        # before publishing so the messages are not silently dropped.
+        print("[lifecycle_activate] waiting 8 s for slam_toolbox to initialize "
+              "before seeding initial pose…")
+        deadline_settle = time.monotonic() + 8.0
+        while time.monotonic() < deadline_settle:
+            rclpy.spin_once(node, timeout_sec=0.5)
         print(f"[lifecycle_activate] seeding initial pose x={x} y={y} theta={theta}")
         pub = node.create_publisher(PoseWithCovarianceStamped, "/initialpose", 10)
         msg_pose = PoseWithCovarianceStamped()
@@ -142,9 +150,12 @@ def main() -> None:
         msg_pose.pose.covariance[0] = 0.25
         msg_pose.pose.covariance[7] = 0.25
         msg_pose.pose.covariance[35] = 0.068
-        for _ in range(5):
+        for i in range(15):
             pub.publish(msg_pose)
-            rclpy.spin_once(node, timeout_sec=0.1)
+            rclpy.spin_once(node, timeout_sec=0.5)
+            time.sleep(0.5)
+            if i % 5 == 4:
+                print(f"[lifecycle_activate] initial pose published {i + 1}/15")
         print("[lifecycle_activate] initial pose published OK")
 
     _write_status(args.status_file, "active")

@@ -77,6 +77,23 @@ for i in 1 2 3 4 5; do
     sleep 1
 done
 
+# 3b) Save the loop-closed posegraph so localization sessions use this
+#     geometrically correct map instead of the drifted online SLAM posegraph.
+#     Only written if /slam_maps is mounted (production map_pipeline path).
+if [ -d /slam_maps ]; then
+    echo "--- saving posegraph to /slam_maps/rosie_home ---"
+    SERIALIZE_TIMEOUT=${SERIALIZE_MAP_TIMEOUT_SECS:-90}
+    if timeout "${SERIALIZE_TIMEOUT}s" ros2 service call /slam_toolbox/serialize_map \
+        slam_toolbox/srv/SerializePoseGraph \
+        "{filename: '/slam_maps/rosie_home'}"; then
+        echo "  eval posegraph saved OK → localization will use loop-closed map"
+    else
+        echo "  WARNING: eval posegraph save failed or timed out — localization posegraph unchanged"
+    fi
+else
+    echo "--- /slam_maps not mounted, skipping posegraph save ---"
+fi
+
 # Skip map_saver_cli to save ~80 MB of RAM on the Pi.
 # slam_toolbox's save_map writes /out/slam_map.{pgm,yaml} directly.
 

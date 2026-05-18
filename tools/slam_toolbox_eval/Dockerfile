@@ -26,7 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY replay_node.py  /eval/replay_node.py
 COPY slam_params.yaml /eval/slam_params.yaml
 COPY run_eval.sh     /eval/run_eval.sh
-RUN chmod +x /eval/run_eval.sh /eval/replay_node.py
+RUN sed -i 's/\r//' /eval/run_eval.sh /eval/replay_node.py \
+    && chmod +x /eval/run_eval.sh /eval/replay_node.py
 
 # Mount points: input log -> /data/scan.jsonl, output dir -> /out
 VOLUME ["/data", "/out"]
