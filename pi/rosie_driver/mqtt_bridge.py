@@ -367,7 +367,7 @@ class MQTTBridge:
         ui = ui_state.upper()
         if "PAUSED" in ui:
             return "paused"
-        if "CLEANINGRUNNING" in ui or "STARTCLEAN" in ui or "STARTHOUSECLEAN" in ui or "STARTSPOTCLEAN" in ui:
+        if "STARTING" in ui or "CLEANINGRUNNING" in ui or "STARTCLEAN" in ui or "STARTHOUSECLEAN" in ui or "STARTSPOTCLEAN" in ui:
             return "cleaning"
         if "GOTOBASE" in ui or "SENDTOBASE" in ui or "DOCKINGRUNNING" in ui:
             return "returning"

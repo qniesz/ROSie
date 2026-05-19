@@ -28,6 +28,7 @@ cards:
         if (ui.includes('STATE_IDLE')) return 'IDLE';
         if (ui.includes('STATE_STANDBY')) return 'STANDBY';
         if (ui.includes('STATE_TESTMODE')) return 'Test Mode';
+        if (ui.includes('STARTING')) return 'Starting Up...';
         if (ui.includes('STARTHOUSECLEAN')) return 'Starting Clean';
         if (ui.includes('HOUSECLEANINGRUNNING')) return 'Cleaning House';
         if (ui.includes('HOUSECLEANINGPAUSED')) return 'Paused';

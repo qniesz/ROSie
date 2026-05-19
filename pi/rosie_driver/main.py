@@ -448,6 +448,10 @@ def main() -> None:
         elif cmd_lower == "test_bumper_sr":
             bumper_sensors.test_pin("side_right")
         elif cmd_lower in ("start", "house_clean", "spot_clean"):
+            # Give immediate UI feedback — vacuum.rosie shows "Cleaning" and
+            # sensor.rosie_ui_state shows "Starting..." while the SLAM container
+            # warms up (up to 30 s) before the Neato reports CLEANINGRUNNING.
+            mqtt.publish_state("STARTING...", "starting", "none", "none")
             # Ensure slam_toolbox container is running before the robot undocks.
             # No-op if already up; starts/restarts it if it exited after the
             # previous cycle.  The container's 30 s warm-up window aligns with
