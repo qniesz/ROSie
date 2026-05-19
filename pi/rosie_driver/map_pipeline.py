@@ -43,6 +43,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -70,7 +71,13 @@ ERROR             = "error"
 DOCK_COLOUR  = (34, 170, 85)
 ROBOT_COLOUR = (41, 121, 255)
 NOGO_COLOUR  = (220, 40, 40)
+TRAIL_COLOUR = (255, 140,  0)   # orange — pose trail
 BG_COLOUR    = (240, 245, 250)
+
+# Reject SLAM poses that imply faster motion than the robot can physically achieve.
+# Neato D6 max speed is ~0.3 m/s; 0.7 m/s leaves margin while reliably catching
+# slam_toolbox teleports caused by wheel-spin odometry corruption.
+_SLAM_MAX_SPEED = 0.7   # m/s
 
 # Default map directory (no Docker volume; override via MAP_DIR env var)
 DEFAULT_MAP_DIR = Path(os.environ.get("ROSIE_MAP_DIR", "/home/rosie/maps"))
@@ -160,6 +167,10 @@ class MapPipeline:
         self._odom_pose: Optional[tuple] = None    # raw odom fallback
         self._odom_stamp: float = 0.0
         self._pose_stamp: float = 0.0
+        self._slam_pose_reset: bool = True   # accept first pose unconditionally
+
+        # ── Pose trail ───────────────────────────────────────────────────────
+        self._pose_trail: deque = deque(maxlen=10000)  # (x, y) map-frame metres
 
         # ── No-go lines ───────────────────────────────────────────────────
         self._nogo_lines: list = []        # list of {"p1":[x,y],"p2":[x,y]}
@@ -282,8 +293,23 @@ class MapPipeline:
         Ignored during mapping mode (the container hasn't processed enough
         scans yet for a trustworthy map-frame pose at cycle start).
         """
+        now = time.monotonic()
+        if self._robot_pose is not None and not self._slam_pose_reset:
+            dt = now - self._pose_stamp
+            if dt > 0:
+                dist = math.hypot(x - self._robot_pose[0], y - self._robot_pose[1])
+                speed = dist / dt
+                if speed > _SLAM_MAX_SPEED:
+                    logger.warning(
+                        "SLAM pose rejected: %.2f m in %.2fs = %.2f m/s "
+                        "(limit %.1f m/s) — likely wheel-spin odom jump",
+                        dist, dt, speed, _SLAM_MAX_SPEED,
+                    )
+                    return
+        self._slam_pose_reset = False
         self._robot_pose = (x, y, theta)
-        self._pose_stamp = time.monotonic()
+        self._pose_stamp = now
+        self._pose_trail.append((x, y))
 
     def on_state(self, ui_state: Optional[str] = None,
                  ext_power: Optional[bool] = None) -> None:
@@ -359,6 +385,7 @@ class MapPipeline:
             self._dock_pose,
             docked,
             tuple(json.dumps(l, sort_keys=True) for l in self._nogo_lines),
+            len(self._pose_trail),
         )
         if key == self._last_overlay_key:
             return
@@ -601,6 +628,8 @@ class MapPipeline:
 
     def _pipeline_impl(self) -> None:
         # ── 1. Clear old map ──────────────────────────────────────────────
+        self._pose_trail.clear()
+        self._slam_pose_reset = True   # mapping container sends from a fresh origin
         self._publish_status(CLEARING)
         self._clear_old_map()
 
@@ -965,6 +994,9 @@ class MapPipeline:
     _POSEGRAPH_HOST   = Path("/home/rosie/slam_maps/rosie_home.posegraph")
     _POSEGRAPH_DATA   = Path("/home/rosie/slam_maps/rosie_home.posegraph.data")
     _ENV_FILE         = Path("/home/rosie/rosie-driver.env")
+    # Host path to localization params — mounted into container to override baked-in copy.
+    # Allows tuning without an image rebuild; run_online.sh uses /eval/slam_params_localization.yaml.
+    _SLAM_LOC_PARAMS  = Path("/home/rosie/rosie/tools/slam_toolbox_eval/slam_params_localization.yaml")
 
     def ensure_online_slam(self) -> None:
         """Start the slam_online container in localization mode if not running.
@@ -978,6 +1010,8 @@ class MapPipeline:
         slam_toolbox has seeded the initial pose at the dock (0,0,0) BEFORE
         the robot starts moving, preventing wrong-room localization.
         """
+        self._pose_trail.clear()   # fresh trail for each new cleaning cycle
+        self._slam_pose_reset = True   # container (re)starts from dock pose
         if self._status in (MAPPING, WAITING_FOR_DOCK):
             return
         try:
@@ -1036,6 +1070,15 @@ class MapPipeline:
 
             _res = _slam_resources()
             logger.info("slam_online start (ensure): board resources: %s", _res)
+            loc_params_args = []
+            if self._SLAM_LOC_PARAMS.exists():
+                loc_params_args = [
+                    "-v",
+                    f"{self._SLAM_LOC_PARAMS}:/eval/slam_params_localization.yaml:ro",
+                ]
+            else:
+                logger.warning("slam_online: localization params not found at %s; "
+                               "using image defaults", self._SLAM_LOC_PARAMS)
             subprocess.Popen(
                 [
                     "docker", "run", "-d", "--rm",
@@ -1045,6 +1088,7 @@ class MapPipeline:
                     "--memory-swap", _res["swap"],
                     "-v", f"{self._SLAM_MAPS_HOST}:/slam_maps",
                     "-v", f"{self._SLAM_OUT_HOST}:/out",
+                    *loc_params_args,
                     "--env-file", str(self._ENV_FILE),
                     self._SLAM_IMAGE,
                 ],
@@ -1089,53 +1133,58 @@ class MapPipeline:
         briefly mis-localize on the very first scan after the LDS wakes because
         it hasn't had scan data since the previous cleaning ended.
 
-        Uses lifecycle_activate.py --seed-pose which detects the node is already
-        ACTIVE and publishes without the 8 s settle wait, taking ~8 s total.
+        Uses 'ros2 topic pub --once /initialpose' directly rather than
+        lifecycle_activate.py.  The lifecycle approach created a persistent
+        DDS participant via docker exec that competed with slam_toolbox for
+        DDS resources on the Pi Zero 2 W, causing the lifecycle service call
+        to time out.  A one-shot topic publish avoids that contention.
         Non-fatal: if docker exec fails, we log and proceed.
         """
-        status_file = self._SLAM_OUT_HOST / "lifecycle_status.txt"
-        try:
-            status_file.unlink(missing_ok=True)
-        except Exception:
-            pass
+        import math
+        qz = math.sin(pth / 2.0)
+        qw = math.cos(pth / 2.0)
         logger.info(
             "Re-seeding slam_online initial pose at (%.2f, %.2f, %.2f)", px, py, pth
         )
         self._publish_slam_status("reseeding", "re-seeding initial pose for new cleaning")
+        cov = (
+            "[0.0025,0.0,0.0,0.0,0.0,0.0,"
+            "0.0,0.0025,0.0,0.0,0.0,0.0,"
+            "0.0,0.0,0.0,0.0,0.0,0.0,"
+            "0.0,0.0,0.0,0.0,0.0,0.0,"
+            "0.0,0.0,0.0,0.0,0.0,0.0,"
+            "0.0,0.0,0.0,0.0,0.0,0.0076]"
+        )
+        msg = (
+            f"{{header: {{stamp: {{sec: 0, nanosec: 0}}, frame_id: map}}, "
+            f"pose: {{pose: {{position: {{x: {px:.6f}, y: {py:.6f}, z: 0.0}}, "
+            f"orientation: {{x: 0.0, y: 0.0, z: {qz:.6f}, w: {qw:.6f}}}}}, "
+            f"covariance: {cov}}}}}"
+        )
+        cmd = (
+            "source /opt/ros/jazzy/setup.bash && "
+            f"timeout 10s ros2 topic pub --once /initialpose "
+            f"geometry_msgs/msg/PoseWithCovarianceStamped '{msg}'"
+        )
         try:
-            proc = subprocess.Popen(
-                [
-                    "docker", "exec",
-                    self._SLAM_CONTAINER,
-                    "python3", "/eval/lifecycle_activate.py",
-                    "--status-file", "/out/lifecycle_status.txt",
-                    "--slam-mode", "localization",
-                    "--seed-pose", str(px), str(py), str(pth),
-                    "--timeout", "60",
-                ],
+            result = subprocess.run(
+                ["docker", "exec", self._SLAM_CONTAINER, "bash", "-c", cmd],
+                timeout=15,
+                capture_output=True,
             )
+            if result.returncode == 0:
+                logger.info("slam_online pose re-seeded OK")
+            else:
+                logger.warning(
+                    "slam_online pose reseed exited %d: %s",
+                    result.returncode,
+                    result.stderr.decode(errors="replace")[:200],
+                )
+        except subprocess.TimeoutExpired:
+            logger.warning("slam_online pose reseed timed out after 15 s — proceeding anyway")
         except Exception:
-            logger.warning("Failed to launch reseed docker exec", exc_info=True)
-            self._publish_slam_status("active", "reseed launch failed (non-fatal)")
-            return
-        deadline = time.time() + 60
-        while time.time() < deadline:
-            try:
-                txt = status_file.read_text().strip().lower()
-                if txt == "active":
-                    logger.info("slam_online pose re-seeded OK")
-                    self._publish_slam_status("active")
-                    return
-                if txt.startswith("failed"):
-                    logger.warning("slam_online pose reseed reported failure: %s", txt)
-                    self._publish_slam_status("active", "reseed failed (non-fatal)")
-                    return
-            except FileNotFoundError:
-                pass
-            time.sleep(2)
-        proc.kill()
-        logger.warning("slam_online pose reseed timed out after 60 s — proceeding anyway")
-        self._publish_slam_status("active", "reseed timed out (non-fatal)")
+            logger.warning("Failed to run reseed docker exec", exc_info=True)
+        self._publish_slam_status("active")
 
     def _start_mapping_slam(self) -> None:
         """Start slam_online in MAPPING mode (no posegraph).
@@ -1392,6 +1441,30 @@ class MapPipeline:
 
             icon_font  = _font(int(scale * 3 * 1.2))
             label_font = _font(max(10, scale * 2), bold=True)
+
+            # ── Pose trail ───────────────────────────────────────────────
+            if self._pose_trail:
+                trail_pts: list[tuple[int, int]] = []
+                prev_px: tuple[int, int] | None = None
+                max_gap = max(30, scale * 8)   # px gap that signals a pose jump
+                for tx, ty in self._pose_trail:
+                    tpx, tpy = self._map_to_pixel(tx, ty, meta)
+                    if not (0 <= tpx < img.width and 0 <= tpy < img.height):
+                        # Out of bounds — flush segment and break the polyline
+                        if len(trail_pts) >= 2:
+                            draw.line(trail_pts, fill=TRAIL_COLOUR, width=scale * 4)
+                        trail_pts = []
+                        prev_px = None
+                        continue
+                    if prev_px is not None and math.hypot(tpx - prev_px[0], tpy - prev_px[1]) > max_gap:
+                        # Large jump (reseed / teleport) — flush and restart
+                        if len(trail_pts) >= 2:
+                            draw.line(trail_pts, fill=TRAIL_COLOUR, width=scale * 4)
+                        trail_pts = []
+                    trail_pts.append((tpx, tpy))
+                    prev_px = (tpx, tpy)
+                if len(trail_pts) >= 2:
+                    draw.line(trail_pts, fill=TRAIL_COLOUR, width=scale * 4)
 
             # ── Dock marker ───────────────────────────────────────────────
             if self._dock_pose:

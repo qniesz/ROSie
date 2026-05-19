@@ -185,7 +185,7 @@ BRIDGE_PID=$!
 echo "--- starting slam_toolbox ($SLAM_NODE) ---"
 ros2 run slam_toolbox "$SLAM_NODE" \
     --ros-args --params-file "$PARAMS" \
-    --log-level DEBUG \
+    --log-level WARN \
     > "$OUT/slam.log" 2>&1 &
 SLAM_PID=$!
 
