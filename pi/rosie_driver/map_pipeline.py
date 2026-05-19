@@ -992,7 +992,11 @@ class MapPipeline:
             )
             if self._SLAM_CONTAINER in res.stdout:
                 if self._slam_started_this_session:
-                    return   # we started it this session — still loaded the right posegraph
+                    # Container is running from this session.  Re-seed the
+                    # initial pose so SLAM starts each cleaning from the dock
+                    # even if LDS has been off for hours between cleanings.
+                    self._reseed_slam_pose()
+                    return
                 # Stale container survived a service restart; stop it so the
                 # fresh start loads the current posegraph from disk.
                 logger.info(
@@ -1071,6 +1075,67 @@ class MapPipeline:
         except Exception:
             logger.warning("ensure_online_slam failed", exc_info=True)
             self._publish_slam_status("error", "ensure_online_slam exception")
+
+    def _reseed_slam_pose(
+        self,
+        px: float = 0.0,
+        py: float = 0.0,
+        pth: float = 0.0,
+    ) -> None:
+        """Re-publish /initialpose inside the running slam_online container.
+
+        Called at the start of each cleaning when the container was already up
+        (second or later cleaning in the same session).  Without this, SLAM may
+        briefly mis-localize on the very first scan after the LDS wakes because
+        it hasn't had scan data since the previous cleaning ended.
+
+        Uses lifecycle_activate.py --seed-pose which detects the node is already
+        ACTIVE and publishes without the 8 s settle wait, taking ~8 s total.
+        Non-fatal: if docker exec fails, we log and proceed.
+        """
+        status_file = self._SLAM_OUT_HOST / "lifecycle_status.txt"
+        try:
+            status_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+        logger.info(
+            "Re-seeding slam_online initial pose at (%.2f, %.2f, %.2f)", px, py, pth
+        )
+        self._publish_slam_status("reseeding", "re-seeding initial pose for new cleaning")
+        try:
+            proc = subprocess.Popen(
+                [
+                    "docker", "exec",
+                    self._SLAM_CONTAINER,
+                    "python3", "/eval/lifecycle_activate.py",
+                    "--status-file", "/out/lifecycle_status.txt",
+                    "--slam-mode", "localization",
+                    "--seed-pose", str(px), str(py), str(pth),
+                    "--timeout", "60",
+                ],
+            )
+        except Exception:
+            logger.warning("Failed to launch reseed docker exec", exc_info=True)
+            self._publish_slam_status("active", "reseed launch failed (non-fatal)")
+            return
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            try:
+                txt = status_file.read_text().strip().lower()
+                if txt == "active":
+                    logger.info("slam_online pose re-seeded OK")
+                    self._publish_slam_status("active")
+                    return
+                if txt.startswith("failed"):
+                    logger.warning("slam_online pose reseed reported failure: %s", txt)
+                    self._publish_slam_status("active", "reseed failed (non-fatal)")
+                    return
+            except FileNotFoundError:
+                pass
+            time.sleep(2)
+        proc.kill()
+        logger.warning("slam_online pose reseed timed out after 60 s — proceeding anyway")
+        self._publish_slam_status("active", "reseed timed out (non-fatal)")
 
     def _start_mapping_slam(self) -> None:
         """Start slam_online in MAPPING mode (no posegraph).

@@ -91,6 +91,11 @@ def main() -> None:
     state_id = fut.result().current_state.id
     print(f"[lifecycle_activate] current state id={state_id}")
 
+    # Track whether WE performed the activate transition.  When slam_toolbox
+    # was already ACTIVE (re-seed path) its /initialpose subscriber is already
+    # ready so the 8 s settle wait below can be skipped entirely.
+    just_activated = False
+
     # ── Configure ─────────────────────────────────────────────────────────────
     if state_id == State.PRIMARY_STATE_UNCONFIGURED:
         req = ChangeState.Request()
@@ -121,6 +126,7 @@ def main() -> None:
             rclpy.shutdown()
             sys.exit(1)
         print("[lifecycle_activate] activated OK")
+        just_activated = True
     elif state_id == State.PRIMARY_STATE_ACTIVE:
         print("[lifecycle_activate] already active")
     else:
@@ -131,12 +137,17 @@ def main() -> None:
             and args.slam_mode == "localization"
             and _HAS_GEOM):
         x, y, theta = args.seed_pose
-        # slam_toolbox returns the activate service response before its internal
-        # /initialpose subscriber is ready.  Wait for it to fully initialize
-        # before publishing so the messages are not silently dropped.
-        print("[lifecycle_activate] waiting 8 s for slam_toolbox to initialize "
-              "before seeding initial pose…")
-        deadline_settle = time.monotonic() + 8.0
+        # When WE just performed the activate transition, slam_toolbox's internal
+        # /initialpose subscriber may not be ready yet — wait 8 s to avoid drops.
+        # When slam_toolbox was already ACTIVE (re-seed path after hours of idle),
+        # the subscriber has long been ready so we skip the wait entirely.
+        if just_activated:
+            print("[lifecycle_activate] waiting 8 s for slam_toolbox to initialize "
+                  "before seeding initial pose…")
+            deadline_settle = time.monotonic() + 8.0
+        else:
+            print("[lifecycle_activate] slam_toolbox already active — seeding pose immediately")
+            deadline_settle = time.monotonic()  # no wait needed
         while time.monotonic() < deadline_settle:
             rclpy.spin_once(node, timeout_sec=0.5)
         print(f"[lifecycle_activate] seeding initial pose x={x} y={y} theta={theta}")
