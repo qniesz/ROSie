@@ -1026,25 +1026,40 @@ class MapPipeline:
             )
             if self._SLAM_CONTAINER in res.stdout:
                 if self._slam_started_this_session:
-                    # Container is running from this session.  Re-seed the
-                    # initial pose so SLAM starts each cleaning from the dock
-                    # even if LDS has been off for hours between cleanings.
-                    self._reseed_slam_pose()
-                    return
-                # Stale container survived a service restart; stop it so the
-                # fresh start loads the current posegraph from disk.
-                logger.info(
-                    "slam_online container is stale (pre-restart) — stopping to reload posegraph"
-                )
-                self._publish_slam_status("restarting", "replacing stale container")
-                try:
-                    subprocess.run(
-                        ["docker", "stop", self._SLAM_CONTAINER],
-                        capture_output=True, timeout=30, check=False,
+                    # Container is running from a previous clean this session.
+                    # Restart it so slam_toolbox reloads the posegraph from
+                    # disk and seeds a clean initial pose at the dock (0,0,0).
+                    # Re-seeding via /initialpose is unreliable after the
+                    # container has been running for hours in localization mode.
+                    logger.info(
+                        "slam_online already running from this session — restarting "
+                        "for fresh localization from dock"
                     )
-                except Exception:
-                    pass
-                # fall through to start fresh
+                    self._publish_slam_status("restarting", "reloading posegraph for clean start")
+                    try:
+                        subprocess.run(
+                            ["docker", "stop", self._SLAM_CONTAINER],
+                            capture_output=True, timeout=30, check=False,
+                        )
+                    except Exception:
+                        pass
+                    self._slam_started_this_session = False
+                    # fall through to start fresh
+                else:
+                    # Stale container survived a service restart; stop it so the
+                    # fresh start loads the current posegraph from disk.
+                    logger.info(
+                        "slam_online container is stale (pre-restart) — stopping to reload posegraph"
+                    )
+                    self._publish_slam_status("restarting", "replacing stale container")
+                    try:
+                        subprocess.run(
+                            ["docker", "stop", self._SLAM_CONTAINER],
+                            capture_output=True, timeout=30, check=False,
+                        )
+                    except Exception:
+                        pass
+                    # fall through to start fresh
             logger.info("slam_online container not running — starting it")
             self._publish_slam_status("starting")
             self._SLAM_MAPS_HOST.mkdir(parents=True, exist_ok=True)
