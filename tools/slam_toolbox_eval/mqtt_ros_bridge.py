@@ -376,7 +376,34 @@ class BridgeNode(Node):
                     f"right={p.get('right_load', '?'):.0f}%)"
                 )
             elif not stall and self._load_stall_active:
-                self.get_logger().warn("load-stall END — resuming odom TF and scans")
+                # Reset odom origin so encoder motion accumulated during the
+                # stall (wheels spinning against furniture) is NOT applied as a
+                # sudden TF jump when publishing resumes.  Without this, the
+                # first post-stall odom step is a large position step that
+                # causes slam_toolbox to find a wrong scan match → scan goes off.
+                # Identical in effect to the slip-clear origin reset in _handle_scan.
+                if (
+                    self._last_driver_pos is not None
+                    and self._last_odom_transform is not None
+                ):
+                    self._odom_origin = self._last_driver_pos
+                    self._prev_norm_x = None
+                    self._prev_norm_y = None
+                    ft = self._last_odom_transform
+                    self._slip_x_offset = ft.translation.x
+                    self._slip_y_offset = ft.translation.y
+                    self._slip_th_offset = yaw_from_quat(
+                        ft.rotation.x, ft.rotation.y,
+                        ft.rotation.z, ft.rotation.w,
+                    )
+                    self.get_logger().warn(
+                        "load-stall END — origin reset to discard stall encoder drift, "
+                        f"offset=({self._slip_x_offset:.2f} m, "
+                        f"{self._slip_y_offset:.2f} m, "
+                        f"{math.degrees(self._slip_th_offset):.1f}°)"
+                    )
+                else:
+                    self.get_logger().warn("load-stall END — resuming odom TF and scans")
             self._load_stall_active = stall
             if not self._slip_active and not self._load_stall_active:
                 self.tf_br.sendTransform(t)
