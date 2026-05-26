@@ -29,7 +29,7 @@ slam_toolbox:
     use_scan_matching: true
     use_scan_barycenter: true
     minimum_travel_distance: 0.05      # 0.10 → 0.05 (2026-05-25): match every 5 cm; faster error correction after wheel-spin stall
-    minimum_travel_heading: 0.15       # 0.15: capture heading changes during bump-recovery turns
+    minimum_travel_heading: 0.05       # 0.15 → 0.05 (2026-05-25): match every ~2.9°; map→odom updates every LiDAR scan during turns → scan stays locked to walls
 
     scan_buffer_size: 30                     # 10 → 30; more retained scans improves matching on 1.5 GB Pi
     scan_buffer_maximum_scan_distance: 8.0
