@@ -32,6 +32,13 @@ SLIP_RPM_THRESHOLD  = int(os.environ.get("SLIP_RPM_THRESHOLD",  "30"))
 SLIP_LOAD_THRESHOLD = int(os.environ.get("SLIP_LOAD_THRESHOLD", "20"))
 SLIP_MIN_FRAMES     = int(os.environ.get("SLIP_MIN_FRAMES",     "3"))
 
+# Single-wheel stall: one wheel physically blocked (e.g. pressed against a
+# table leg) while the other spins.  Bilateral threshold is not met in this
+# case, so we use a higher load threshold + near-zero RPM on ONE wheel.
+# Encoder deltas are zeroed for both wheels to avoid phantom pivot drift.
+SINGLE_STALL_LOAD_THRESHOLD = int(os.environ.get("SINGLE_STALL_LOAD_THRESHOLD", "85"))
+SINGLE_STALL_RPM_THRESHOLD  = int(os.environ.get("SINGLE_STALL_RPM_THRESHOLD",  "25"))
+
 # Tilt suppression: if the robot is pitched/rolled beyond this angle the
 # kinematic model is unreliable (climbing a rug edge, wedged on furniture).
 TILT_THRESHOLD_DEG  = float(os.environ.get("TILT_THRESHOLD_DEG", "8.0"))
@@ -62,9 +69,11 @@ class OdomState:
     left_rpm: float = 0.0
     right_rpm: float = 0.0
 
-    # Stall state — True when bilateral high load freezes encoder deltas
+    # Stall state — True when bilateral high load freezes encoder deltas,
+    # or when one wheel is physically blocked (high load + near-zero RPM).
     stall_active: bool = False
     _stall_count: int = 0
+    _single_stall_count: int = 0
 
     # Slip state — True when high RPM + low load indicates free spinning
     slip_active: bool = False
@@ -171,14 +180,38 @@ def update_odometry(odom: OdomState, motor_state: dict[str, float],
     else:
         odom._stall_count = 0
     _stall = odom._stall_count >= STALL_MIN_FRAMES
-    if _stall and not odom.stall_active:
-        logger.warning(
-            "stall detected: left_load=%.0f%% right_load=%.0f%% — "
-            "zeroing encoder deltas", _left_load, _right_load
-        )
-    elif not _stall and odom.stall_active:
+
+    # --- Single-wheel block (one wheel against table leg, other spinning) ---
+    # Higher load threshold + near-zero RPM → one wheel is physically stopped.
+    _left_blocked  = (_left_load  > SINGLE_STALL_LOAD_THRESHOLD
+                      and abs(_left_rpm)  < SINGLE_STALL_RPM_THRESHOLD)
+    _right_blocked = (_right_load > SINGLE_STALL_LOAD_THRESHOLD
+                      and abs(_right_rpm) < SINGLE_STALL_RPM_THRESHOLD)
+    if (_left_blocked or _right_blocked) and not _stall:
+        odom._single_stall_count += 1
+    else:
+        odom._single_stall_count = 0
+    _single_stall = odom._single_stall_count >= STALL_MIN_FRAMES
+
+    _any_stall = _stall or _single_stall
+    if _any_stall and not odom.stall_active:
+        if _single_stall:
+            side = "left" if _left_blocked else "right"
+            logger.warning(
+                "single-wheel stall: %s blocked load=%.0f%% rpm=%.0f — "
+                "zeroing encoder deltas",
+                side,
+                _left_load if _left_blocked else _right_load,
+                _left_rpm  if _left_blocked else _right_rpm,
+            )
+        else:
+            logger.warning(
+                "stall detected: left_load=%.0f%% right_load=%.0f%% — "
+                "zeroing encoder deltas", _left_load, _right_load
+            )
+    elif not _any_stall and odom.stall_active:
         logger.info("stall cleared")
-    odom.stall_active = _stall
+    odom.stall_active = _any_stall
 
     # --- Slip detection (high RPM + low load = spinning freely, no traction) ---
     # Both wheels must show free-spin simultaneously: during a normal turn one
@@ -230,8 +263,9 @@ def update_odometry(odom: OdomState, motor_state: dict[str, float],
     if dt <= 0:
         return odom
 
-    # Zero encoder deltas when wheels are spinning freely (no traction).
-    if _slip:
+    # Zero encoder deltas when wheels are spinning freely (no traction),
+    # or when any stall condition is active (bilateral or single-wheel block).
+    if _slip or _any_stall:
         d_left = 0.0
         d_right = 0.0
 
