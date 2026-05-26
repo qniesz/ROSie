@@ -15,7 +15,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("help", "dev-mode", "setup-ssh", "sync", "sync-runtime", "check", "restart", "status", "logs", "collect-logs", "release-check")]
+    [ValidateSet("help", "dev-mode", "setup-ssh", "sync", "sync-runtime", "check", "restart", "status", "logs", "collect-logs", "release-check", "run")]
     [string]$Command,
 
     [Parameter(Position = 1, ValueFromRemainingArguments = $true)]
@@ -482,5 +482,13 @@ switch ($Command) {
     }
     "release-check" {
         Invoke-ReleaseCheck
+    }
+
+    "run" {
+        if ($Paths.Count -eq 0) {
+            Write-Error "Usage: dev_pi.ps1 run <remote-command>"
+            exit 1
+        }
+        Invoke-Pi -RemoteCommand ($Paths -join " ")
     }
 }

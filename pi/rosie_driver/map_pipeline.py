@@ -1462,7 +1462,7 @@ class MapPipeline:
                 trail_pts: list[tuple[int, int]] = []
                 prev_px: tuple[int, int] | None = None
                 max_gap = max(30, scale * 8)   # px gap that signals a pose jump
-                for tx, ty in self._pose_trail:
+                for tx, ty in list(self._pose_trail):
                     tpx, tpy = self._map_to_pixel(tx, ty, meta)
                     if not (0 <= tpx < img.width and 0 <= tpy < img.height):
                         # Out of bounds — flush segment and break the polyline
