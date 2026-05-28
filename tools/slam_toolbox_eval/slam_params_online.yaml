@@ -21,6 +21,10 @@ slam_toolbox:
     # ── Sensor / scan matching ─────────────────────────────────────────────
     resolution: 0.10              # 0.05 → 0.10: quarters map RAM; 10 cm ok for ROSie footprint
     max_laser_range: 5.0
+    # min_laser_range intentionally NOT set: the Neato drives 5–20 cm from walls,
+    # so LiDAR returns at 20–35 cm from center are critical for scan matching.
+    # Filtering those out causes SLAM to lose position near walls and enter a
+    # sustained rejection cascade it cannot recover from (tested 2026-05-27).
     minimum_time_interval: 0.2    # cap to ~5 Hz
     transform_timeout: 0.5
     tf_buffer_duration: 10.0      # 30 → 10 s (we don't need history)
@@ -40,12 +44,13 @@ slam_toolbox:
     #   0.35 → OOB crash (not a multiple of 0.02)
     #   0.40 → working but too narrow for wheel-spin recovery (±20 cm window)
     #   0.50 → lateral slide (false match on parallel wall — do NOT use)
-    #   0.60 → current (2026-05-25): ±30 cm; recovers from table-stuck wheel-spin
-    # Rationale: wheel spin under table → odom jumps 50+ cm; true pose outside ±20 cm → bad match.
-    # Localization yaml uses 0.70 for same reason. Skip 0.50 (documented slide).
-    correlation_search_space_dimension: 0.60       # 0.40 → 0.60 (2026-05-25): wider window for wheel-spin odom recovery; 0.60/0.02=30 ✓
+    #   0.60 → 2026-05-25 trial: caused sustained SLAM cascade after stall (map divergence) — REVERTED
+    #   0.40 → restored 2026-05-27: encoder drift now handled in odometry.py + bridge, so wide window not needed
+    # Reverted: with min_laser_range removed and odometry-level stall fixes in place, 0.40 is sufficient.
+    # Wider window (0.60) + sparse scan (from min_laser_range) = false long-distance match cascade.
+    correlation_search_space_dimension: 0.40
     correlation_search_space_resolution: 0.02  # 0.05 → 0.02; finer search for better pose accuracy on 1.5 GB Pi
-    correlation_search_space_smear_deviation: 0.15 # 0.10 → 0.15 (2026-05-25): wider Gaussian smear → larger basin of attraction when far from true pose
+    correlation_search_space_smear_deviation: 0.10 # reverted 2026-05-27 (0.15 trial caused cascade with 0.60 dimension)
 
     # ── Loop closure ENABLED for online use ──────────────────────────────────
     #

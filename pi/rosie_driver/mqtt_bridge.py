@@ -90,6 +90,7 @@ class MQTTBridge:
         # Callbacks set by the main loop
         self._command_callback: Optional[Callable[[str], None]] = None
         self._cmd_vel_callback: Optional[Callable[[float, float], None]] = None
+        self._navigate_to_callback: Optional[Callable[[float, float], None]] = None
         self._nogo_lines_callback: Optional[
             Callable[[list], tuple[bool, str, list[dict[str, list[float]]]]]
         ] = None
@@ -127,6 +128,9 @@ class MQTTBridge:
 
     def set_cmd_vel_callback(self, cb: Callable[[float, float], None]) -> None:
         self._cmd_vel_callback = cb
+
+    def set_navigate_to_callback(self, cb: Callable[[float, float], None]) -> None:
+        self._navigate_to_callback = cb
 
     def set_nogo_lines_callback(
         self,
@@ -702,6 +706,7 @@ class MQTTBridge:
             subs = [
                 (f"{pfx}/command", 1),
                 (f"{pfx}/cmd_vel", 0),
+                (f"{pfx}/navigate_to", 0),
                 (f"{pfx}/pose", 0),
                 (f"{pfx}/settings/+/set", 1),
                 (f"{pfx}/spot_width/set", 1),
@@ -745,6 +750,18 @@ class MQTTBridge:
                     )
                 except (json.JSONDecodeError, ValueError, TypeError) as exc:
                     logger.warning("Invalid cmd_vel payload: %s — %s", payload, exc)
+
+        # --- Navigate-to point commands (from drive-map card) ---
+        elif topic == f"{pfx}/navigate_to":
+            if self._navigate_to_callback:
+                try:
+                    data = json.loads(payload)
+                    self._navigate_to_callback(
+                        float(data["x"]),
+                        float(data["y"]),
+                    )
+                except (json.JSONDecodeError, ValueError, KeyError, TypeError) as exc:
+                    logger.warning("Invalid navigate_to payload: %s — %s", payload, exc)
 
         # --- SLAM-corrected pose from ROS 2 ---
         elif topic == f"{pfx}/pose":

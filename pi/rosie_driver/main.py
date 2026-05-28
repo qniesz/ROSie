@@ -30,6 +30,7 @@ from .odometry import OdomState, AccelState, get_motors, get_accel, update_odome
 from .sensors import get_battery, get_bumpers, get_robot_state, get_user_settings, get_version, format_model, format_firmware
 from .commands import handle_command, handle_cmd_vel
 from .mqtt_bridge import MQTTBridge
+from .navigator import PointNavigator
 from . import no_go_guard
 from . import bumper_sensors
 
@@ -344,8 +345,10 @@ def main() -> None:
     lds_active = False
     force_poll = False  # set True by "update_status" command
 
-    # pipeline is set after MQTT connects; pre-declare so closures can reference it
+    # pipeline and navigator are set after MQTT connects; pre-declare so closures
+    # can reference them via late binding.
     pipeline = None
+    navigator = None
 
     def activate_lds():
         """Enter TestMode, spin up LDS for LIDAR scans + motor control."""
@@ -408,6 +411,36 @@ def main() -> None:
             # Delegate to map pipeline if enabled
             if pipeline is not None:
                 pipeline.on_command("create_map")
+        elif cmd_lower == "create_map_auto":
+            # Auto mode: identical to legacy create_map (cleaning cycle + SLAM)
+            ok, msg, exported = no_go_guard.set_lines([])
+            logger.info("New map (auto) requested — no-go lines cleared: %s", msg)
+            no_go_guard.save_lines_file(NOGO_LINES_FILE)
+            mqtt.publish_nogo_lines(exported)
+            mqtt.publish_nogo_status("ok", "cleared for new map")
+            if pipeline is not None:
+                pipeline.on_command("create_map_auto")
+        elif cmd_lower == "create_map_manual":
+            # Manual mode: activate LDS so SLAM gets scans; user drives the robot
+            ok, msg, exported = no_go_guard.set_lines([])
+            logger.info("New map (manual) requested — no-go lines cleared: %s", msg)
+            no_go_guard.save_lines_file(NOGO_LINES_FILE)
+            mqtt.publish_nogo_lines(exported)
+            mqtt.publish_nogo_status("ok", "cleared for new map")
+            activate_lds()
+            if pipeline is not None:
+                pipeline.on_command("create_map_manual")
+        elif cmd_lower == "finish_map":
+            # End a manual mapping session: stop navigator, deactivate LDS, signal pipeline
+            if pipeline is not None and pipeline._status in ("manual_mapping", "manual_ready"):
+                if navigator is not None:
+                    navigator.stop()
+                deactivate_lds()
+                pipeline.on_command("finish_map")
+            else:
+                logger.warning(
+                    "finish_map received but pipeline is not in a manual state — ignoring"
+                )
         elif cmd_lower == "update":
             update_script = os.path.join(
                 os.path.expanduser("~"), "rosie", "pi", "update.sh"
@@ -447,8 +480,15 @@ def main() -> None:
             bumper_sensors.test_pin("side_left")
         elif cmd_lower == "test_bumper_sr":
             bumper_sensors.test_pin("side_right")
+        elif cmd_lower == "return_to_base":
+            if (pipeline is not None and pipeline._status == "manual_ready"
+                    and navigator is not None):
+                # During manual mapping: navigate to dock (0, 0) and auto-save on arrival
+                logger.info("Return to Dock during manual mapping — navigating to (0, 0)")
+                navigator.navigate_to(0.0, 0.0, on_arrived=_do_finish_map)
+            else:
+                handle_command(serial, cmd, skey)
         elif cmd_lower in ("start", "house_clean", "spot_clean"):
-            # Give immediate UI feedback — vacuum.rosie shows "Cleaning" and
             # sensor.rosie_ui_state shows "Starting..." while the SLAM container
             # warms up (up to 30 s) before the Neato reports CLEANINGRUNNING.
             mqtt.publish_state("STARTING...", "starting", "none", "none")
@@ -471,6 +511,17 @@ def main() -> None:
             return
         handle_cmd_vel(serial, lx, az)
 
+    def on_navigate_to(x: float, y: float) -> None:
+        """Handle rosie/navigate_to messages from the drive-map card."""
+        if pipeline is None or pipeline._status != "manual_ready":
+            logger.debug("navigate_to ignored — pipeline not in manual_ready state")
+            return
+        if navigator is None:
+            logger.warning("navigate_to received but navigator not initialized")
+            return
+        logger.info("Navigate to (%.3f, %.3f)", x, y)
+        navigator.navigate_to(x, y)
+
     def on_nogo_lines(lines: list) -> tuple[bool, str, list[dict[str, list[float]]]]:
         ok, msg, exported = no_go_guard.set_lines(lines)
         if not ok:
@@ -487,6 +538,7 @@ def main() -> None:
 
     mqtt.set_command_callback(on_command)
     mqtt.set_cmd_vel_callback(on_cmd_vel)
+    mqtt.set_navigate_to_callback(on_navigate_to)
     mqtt.set_nogo_lines_callback(on_nogo_lines)
 
     try:
@@ -503,6 +555,11 @@ def main() -> None:
     if PIPELINE_ENABLED and _MapPipeline is not None:
         try:
             pipeline = _MapPipeline(mqtt)
+            # Wire deactivate_lds as the cleanup callback for manual mapping
+            # (called in the pipeline's finally block on error/timeout).
+            pipeline._on_manual_stop = deactivate_lds
+            # Wire auto-undock: called after SLAM warms up, before MANUAL_READY.
+            pipeline._do_auto_undock = auto_undock
             pipeline.start()
             # Seed pipeline with no-go lines already loaded from disk
             pipeline.on_nogo_lines(no_go_guard.export_lines())
@@ -811,6 +868,27 @@ def main() -> None:
 
     mqtt.set_slam_pose_callback(_on_slam_pose_arrived)
 
+    def _get_nav_pose() -> tuple | None:
+        """Pose source for PointNavigator — same fusion logic as no-go guard."""
+        o = _latest_odom["odom"]
+        if o is None:
+            return None
+        x, y, theta, _ = _get_guard_pose(o)
+        return (x, y, theta)
+
+    def _do_finish_map() -> None:
+        """Stop navigator, deactivate LDS, then signal pipeline to save the map."""
+        if navigator is not None:
+            navigator.stop()
+        deactivate_lds()
+        if pipeline is not None:
+            pipeline.on_command("finish_map")
+
+    def _on_nav_status(status: str) -> None:
+        mqtt.publish("navigate_to/status", {"status": status}, retain=False)
+
+    navigator = PointNavigator(serial, _get_nav_pose, _on_nav_status)
+
     def _fused_pose(odom_state) -> tuple | None:
         """Return (x, y, theta, anchor_age_s) by extrapolating slam anchor
         with wheel-odom delta.  None if no slam anchor yet.
@@ -1105,11 +1183,13 @@ def main() -> None:
             scan_active = lds_active or robot_cleaning
 
             if scan_active:
-                # Suppress no-go guard during create_map pipeline — the robot is
-                # doing a full-home clean and must not be diverted by stale map lines.
+                # Suppress no-go guard during mapping pipelines — the robot is
+                # either doing a full-home clean (auto) or being driven manually
+                # (manual) and must not be diverted by stale map lines.
                 _pipeline_mapping = (
                     pipeline is not None
-                    and pipeline._status in ("mapping", "waiting_for_dock")
+                    and pipeline._status in ("mapping", "waiting_for_dock",
+                                             "manual_mapping", "manual_ready")
                 )
                 if not _pipeline_mapping:
                     _tick_nogo_pulses(now)

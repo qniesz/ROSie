@@ -60,6 +60,8 @@ IDLE              = "idle"
 CLEARING          = "clearing"
 MAPPING           = "mapping"
 WAITING_FOR_DOCK  = "waiting_for_dock"
+MANUAL_MAPPING    = "manual_mapping"
+MANUAL_READY      = "manual_ready"
 SAVING            = "saving"
 PROCESSING        = "processing"
 PUBLISHING        = "publishing"
@@ -159,6 +161,10 @@ class MapPipeline:
         self._status = IDLE
         self._pipeline_lock = threading.Lock()
         self._slam_started_this_session: bool = False  # True once we start slam_online ourselves
+        self._map_mode: str = "auto"   # "auto" | "manual"
+        self._manual_done_event = threading.Event()
+        self._on_manual_stop = None    # Optional[Callable] — set by main.py after construction
+        self._do_auto_undock = None    # Optional[Callable] — drives forward ~70 cm after SLAM ready
 
         # ── Robot state (updated via on_state / on_odom) ──────────────────
         self._ui_state: str = ""
@@ -337,12 +343,31 @@ class MapPipeline:
 
     def on_command(self, cmd: str) -> None:
         """Handle pipeline-level commands from MQTT."""
-        if cmd == "create_map":
+        if cmd in ("create_map", "create_map_auto"):
+            # "create_map" kept as backward-compatible alias
+            self._map_mode = "auto"
             threading.Thread(
                 target=self._run_pipeline_guarded,
                 name="map-pipeline",
                 daemon=True,
             ).start()
+        elif cmd == "create_map_manual":
+            self._map_mode = "manual"
+            self._manual_done_event.clear()
+            threading.Thread(
+                target=self._run_pipeline_guarded,
+                name="map-pipeline",
+                daemon=True,
+            ).start()
+        elif cmd == "finish_map":
+            if self._status in (MANUAL_MAPPING, MANUAL_READY):
+                logger.info("Finish Map received — ending manual mapping session")
+                self._manual_done_event.set()
+            else:
+                logger.warning(
+                    "finish_map received but pipeline is in state '%s' — ignoring",
+                    self._status,
+                )
         elif cmd == "reboot":
             logger.warning("Reboot requested — rebooting in 3 s")
             subprocess.Popen(["sudo", "reboot"])
@@ -368,7 +393,7 @@ class MapPipeline:
 
     def _maybe_refresh_map(self) -> None:
         """Republish map with updated markers if anything changed."""
-        if self._status not in (IDLE, ERROR):
+        if self._status not in (IDLE, ERROR, MANUAL_READY):
             return   # pipeline manages its own publishes
 
         now = time.monotonic()
@@ -611,6 +636,13 @@ class MapPipeline:
                         self._publish_scan_log_status()
                     except Exception:  # noqa: BLE001
                         logger.debug("scan_recorder.stop failed", exc_info=True)
+                # If we were in manual mode, ensure LDS is deactivated
+                # (idempotent — main.py may have already done this on finish_map).
+                if self._map_mode == "manual" and self._on_manual_stop is not None:
+                    try:
+                        self._on_manual_stop()
+                    except Exception:  # noqa: BLE001
+                        logger.debug("_on_manual_stop callback failed", exc_info=True)
                 # Capture diagnostic logs before we stop/remove the SLAM container.
                 try:
                     self._save_pipeline_diag(self._pipeline_start, _pipeline_error)
@@ -645,45 +677,72 @@ class MapPipeline:
         self._save_dock_pose(0.0, 0.0)
         self._start_mapping_slam()
 
-        # ── 3. Send 'start' to robot ──────────────────────────────────────
+        # ── 3 / 4. Drive the robot and wait until mapping is complete ────────
         self._ui_state = ""              # clear stale retained value
-        self._mqtt.publish("command", "start", qos=1)
 
-        # Wait for robot to undock (up to 2 min)
-        logger.info("Waiting for robot to undock…")
-        undock_deadline = time.time() + 120
-        while time.time() < undock_deadline:
-            if self._stop_event.is_set():
-                raise RuntimeError("Shutdown during pipeline")
-            if not self._is_docked():
-                logger.info("Robot has left the dock")
-                break
-            time.sleep(2)
+        if self._map_mode == "manual":
+            # ── Manual mode: auto-undock, then wait for click-to-navigate
+            # commands until the user presses "Finish Map" or 2-hour timeout.
+            self._publish_status(MANUAL_MAPPING, "SLAM ready — driving off dock\u2026")
+            if self._do_auto_undock is not None:
+                try:
+                    self._do_auto_undock()
+                except Exception:
+                    logger.warning("auto_undock failed — continuing anyway", exc_info=True)
+            self._publish_status(MANUAL_READY,
+                                 "Click the map to navigate. Press Finish Map when done.")
+            logger.info("Manual mapping ready — waiting for Finish Map (timeout %.0f s)",
+                        PIPELINE_TIMEOUT)
+            elapsed = 0.0
+            while elapsed < PIPELINE_TIMEOUT:
+                if self._stop_event.is_set():
+                    raise RuntimeError("Shutdown during pipeline")
+                if self._manual_done_event.wait(timeout=2.0):
+                    logger.info("Finish Map received — proceeding to save (elapsed %.0f s)", elapsed)
+                    time.sleep(2)   # let the last few LiDAR scans drain into SLAM
+                    break
+                elapsed += 2.0
+            else:
+                raise RuntimeError("Manual mapping timeout (2 h) — Finish Map was never pressed")
         else:
-            logger.warning("Robot did not undock within 120 s — continuing anyway")
+            # ── Auto mode: start cleaning cycle and wait for the robot to dock ──
+            self._mqtt.publish("command", "start", qos=1)
 
-        # ── 4. Wait for cleaning to finish and robot to return ────────────
-        self._publish_status(WAITING_FOR_DOCK)
-        start_time = time.time()
-        was_cleaning = False
-        min_dock_time = time.time() + 60   # ignore early dock readings
+            # Wait for robot to undock (up to 2 min)
+            logger.info("Waiting for robot to undock…")
+            undock_deadline = time.time() + 120
+            while time.time() < undock_deadline:
+                if self._stop_event.is_set():
+                    raise RuntimeError("Shutdown during pipeline")
+                if not self._is_docked():
+                    logger.info("Robot has left the dock")
+                    break
+                time.sleep(2)
+            else:
+                logger.warning("Robot did not undock within 120 s — continuing anyway")
 
-        while time.time() - start_time < PIPELINE_TIMEOUT:
-            if self._stop_event.is_set():
-                raise RuntimeError("Shutdown during pipeline")
+            # ── 4. Wait for cleaning to finish and robot to return ────────────
+            self._publish_status(WAITING_FOR_DOCK)
+            start_time = time.time()
+            was_cleaning = False
+            min_dock_time = time.time() + 60   # ignore early dock readings
 
-            if "CLEANING" in self._ui_state.upper():
-                was_cleaning = True
+            while time.time() - start_time < PIPELINE_TIMEOUT:
+                if self._stop_event.is_set():
+                    raise RuntimeError("Shutdown during pipeline")
 
-            if was_cleaning and self._is_docked() and time.time() > min_dock_time:
-                logger.info("Robot returned to dock (elapsed %.0f s)",
-                            time.time() - start_time)
-                time.sleep(10)   # let final scans arrive
-                break
+                if "CLEANING" in self._ui_state.upper():
+                    was_cleaning = True
 
-            time.sleep(2)
-        else:
-            raise RuntimeError("Cleaning timeout (2 h)")
+                if was_cleaning and self._is_docked() and time.time() > min_dock_time:
+                    logger.info("Robot returned to dock (elapsed %.0f s)",
+                                time.time() - start_time)
+                    time.sleep(10)   # let final scans arrive
+                    break
+
+                time.sleep(2)
+            else:
+                raise RuntimeError("Cleaning timeout (2 h)")
 
         # ── 5. Save map ───────────────────────────────────────────────────
         self._publish_status(SAVING)
@@ -738,14 +797,24 @@ class MapPipeline:
         if self._map_meta is not None:
             self._publish_map_meta()
 
-        for fname in ("home_clean.png", "home_meta.json"):
-            p = self._map_dir / fname
+        # In manual mode keep the previous clean map image and metadata so
+        # the drive-map card has a coordinate system to work with while the
+        # new map is being built.  In auto mode clear everything as before.
+        if self._map_mode == "manual":
+            p = self._map_dir / "home_clean.png"
             if p.exists():
                 p.unlink()
-                logger.info("Deleted %s", p)
-
-        self._base_img = None
-        self._map_meta = None
+                logger.info("Deleted %s (keeping home_meta.json for manual mode)", p)
+            self._base_img = None
+            # Keep self._map_meta so _pixelToMap transform stays valid
+        else:
+            for fname in ("home_clean.png", "home_meta.json"):
+                p = self._map_dir / fname
+                if p.exists():
+                    p.unlink()
+                    logger.info("Deleted %s", p)
+            self._base_img = None
+            self._map_meta = None
         self._last_overlay_key = None
 
         blank = Image.new("RGB", (200, 200), BG_COLOUR)
@@ -1641,7 +1710,8 @@ class MapPipeline:
         stale = [
             f"button/{slug}_start_scan_log",
             f"button/{slug}_stop_scan_log",
-            f"button/{slug}_create_map",  # renamed to create_new_map
+            f"button/{slug}_create_map",   # renamed to create_new_map
+            f"button/{slug}_create_new_map",  # replaced by auto/manual variants
         ]
         # If this device uses a prefix other than "rosie", also wipe the old
         # hardcoded "rosie_" topics that were previously published under this
@@ -1659,12 +1729,28 @@ class MapPipeline:
                 f"homeassistant/{_stale}/config", "", qos=1, retain=True,
             )
 
-        # Button: Create New Map
-        self._pub_discovery("button", "create_new_map", {
-            "name": "Create New Map",
+        # Button: Create New Map (Auto) — starts a cleaning cycle; SLAM maps while cleaning
+        self._pub_discovery("button", "create_map_auto", {
+            "name": "New Map (Auto)",
             "command_topic": f"{pfx}/command",
-            "payload_press": "create_map",
+            "payload_press": "create_map_auto",
             "icon": "mdi:map-plus",
+        })
+
+        # Button: Create New Map (Manual) — enters LDS+TestMode; user drives the robot
+        self._pub_discovery("button", "create_map_manual", {
+            "name": "New Map (Manual)",
+            "command_topic": f"{pfx}/command",
+            "payload_press": "create_map_manual",
+            "icon": "mdi:map-marker-path",
+        })
+
+        # Button: Finish Map — ends a manual mapping session and saves the map
+        self._pub_discovery("button", "finish_map", {
+            "name": "Finish Mapping",
+            "command_topic": f"{pfx}/command",
+            "payload_press": "finish_map",
+            "icon": "mdi:map-check",
         })
 
         # Button: Reboot Pi

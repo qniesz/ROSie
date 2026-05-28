@@ -3,27 +3,31 @@
 # Shows the live SLAM floor plan from the MQTT camera entity,
 # vacuum status, pipeline status, and control buttons.
 #
+# During a Manual Map session the drive-map card allows clicking the
+# map to navigate the robot to that point.  Press Return to Dock to
+# drive back to (0, 0) and auto-save, or Finish Mapping to save in
+# place.
+#
 # Setup:
-#   1. The rosie server container auto-registers these entities via
-#      MQTT Discovery:
-#        - camera.rosie_map           (floor plan image, entity ID may be camera.rosie_rosie_map)
-#        - button.rosie_create_new_map (triggers map pipeline)
-#        - sensor.rosie_map_pipeline  (pipeline status)
+#   1. The rosie driver auto-registers these entities via MQTT Discovery:
+#        - camera.rosie_rosie_map          (floor plan image)
+#        - button.rosie_create_map_auto    (start auto mapping cycle)
+#        - button.rosie_create_map_manual  (start manual mapping + LDS)
+#        - button.rosie_finish_map         (end manual mapping, save map)
+#        - sensor.rosie_map_pipeline       (pipeline status)
 #
-#   2. Add this card YAML to a Lovelace dashboard
-#      (Edit dashboard → Add Card → Manual YAML → paste this).
+#   2. Add this card YAML to a Lovelace dashboard.
 #
-#   3. For the no-go editor card, register the JS resource:
+#   3. Register BOTH JS resources:
 #        Settings → Dashboards → Resources → Add:
-#        URL: /local/rosie-nogo-editor-card.js
-#        Type: JavaScript Module
-#      Copy ha/www/rosie-nogo-editor-card.js to your HA's
-#      config/www/ directory.
+#          URL: /local/rosie-nogo-editor-card.js  (Type: JavaScript Module)
+#          URL: /local/rosie-drive-map-card.js    (Type: JavaScript Module)
+#      Copy both ha/www/*.js files to your HA config/www/ directory.
 
 type: vertical-stack
 cards:
-  # No-go line editor (click-to-draw on the map)
-  - type: custom:rosie-nogo-editor-card
+  # Drive map — click to navigate during a Manual Map session
+  - type: custom:rosie-drive-map-card
     camera_entity: camera.rosie_rosie_map
 
   # Vacuum status + battery + pipeline
@@ -41,7 +45,7 @@ cards:
         name: Map Pipeline
         icon: mdi:map-clock
 
-  # Control buttons
+  # Control buttons — row 1: cleaning + map mode selection
   - type: horizontal-stack
     cards:
       - type: button
@@ -69,13 +73,47 @@ cards:
           target:
             entity_id: vacuum.rosie
       - type: button
-        entity: button.rosie_create_new_map
-        name: New Map
+        entity: button.rosie_create_map_auto
+        name: Auto Map
         icon: mdi:map-plus
         show_state: false
         tap_action:
           action: perform-action
           perform_action: button.press
           target:
-            entity_id: button.rosie_create_new_map
+            entity_id: button.rosie_create_map_auto
+      - type: button
+        entity: button.rosie_create_map_manual
+        name: Manual Map
+        icon: mdi:map-marker-path
+        show_state: false
+        tap_action:
+          action: perform-action
+          perform_action: button.press
+          target:
+            entity_id: button.rosie_create_map_manual
+
+  # Row 2: Return to Dock (navigate to 0,0 + auto-save) | Finish Mapping (save in place)
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: Return to Dock
+        icon: mdi:home-import-outline
+        tap_action:
+          action: perform-action
+          perform_action: vacuum.return_to_base
+          target:
+            entity_id: vacuum.rosie
+      - type: button
+        entity: button.rosie_finish_map
+        name: Finish Mapping
+        icon: mdi:map-check
+        show_state: false
+        tap_action:
+          action: perform-action
+          perform_action: button.press
+          target:
+            entity_id: button.rosie_finish_map
+        tap_action:
+          action: none
 
