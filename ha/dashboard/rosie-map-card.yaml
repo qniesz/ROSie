@@ -9,20 +9,13 @@
 # place.
 #
 # Setup:
-#   1. The rosie driver auto-registers these entities via MQTT Discovery:
-#        - camera.rosie_rosie_map          (floor plan image)
-#        - button.rosie_create_map_auto    (start auto mapping cycle)
-#        - button.rosie_create_map_manual  (start manual mapping + LDS)
-#        - button.rosie_finish_map         (end manual mapping, save map)
-#        - sensor.rosie_map_pipeline       (pipeline status)
+#   1. Run scripts/ha_deploy.ps1 once — it copies ha/www/*.js to HA and
+#      registers them as Lovelace JS Module resources automatically.
+#      Requires HA_SAMBA_HOST, HA_SAMBA_USER, HA_SAMBA_PASS, HA_URL, and
+#      HA_TOKEN in your .env file.
 #
-#   2. Add this card YAML to a Lovelace dashboard.
-#
-#   3. Register BOTH JS resources:
-#        Settings → Dashboards → Resources → Add:
-#          URL: /local/rosie-nogo-editor-card.js  (Type: JavaScript Module)
-#          URL: /local/rosie-drive-map-card.js    (Type: JavaScript Module)
-#      Copy both ha/www/*.js files to your HA config/www/ directory.
+#   2. Add this card YAML to a Lovelace dashboard, then hard-refresh
+#      the browser (Ctrl+Shift+R) so the new JS modules are picked up.
 
 type: vertical-stack
 cards:
@@ -114,6 +107,4 @@ cards:
           perform_action: button.press
           target:
             entity_id: button.rosie_finish_map
-        tap_action:
-          action: none
 
