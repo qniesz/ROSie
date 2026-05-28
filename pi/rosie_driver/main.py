@@ -380,6 +380,21 @@ def main() -> None:
         lds_active = False
         logger.info("LDS deactivated")
 
+    def auto_undock() -> None:
+        """Drive forward ~70 cm to clear the dock before manual mapping begins."""
+        def _run() -> None:
+            speed = 0.20        # m/s
+            distance = 0.70     # m
+            interval = 0.10     # s (10 Hz)
+            steps = int(distance / speed / interval)
+            logger.info("[auto_undock] driving forward %.2f m ...", distance)
+            for _ in range(steps):
+                handle_cmd_vel(serial, speed, 0.0)
+                time.sleep(interval)
+            serial.set_motors(0, 0, 0)
+            logger.info("[auto_undock] complete")
+        threading.Thread(target=_run, daemon=True, name="auto_undock").start()
+
     def on_command(cmd: str):
         """Handle all commands."""
         nonlocal force_poll, skey

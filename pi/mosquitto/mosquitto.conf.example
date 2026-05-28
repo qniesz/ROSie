@@ -53,6 +53,7 @@ topic ha_discovery/# out 1 rosie/ rosie/
 # ── Incoming: HA commands → driver ─────────────────────────────────────────
 # topic <pattern> in <qos> <local-prefix> <remote-prefix>
 topic command in 1 rosie/ rosie/
+topic navigate_to in 0 rosie/ rosie/
 topic cmd_vel in 0 rosie/ rosie/
 topic settings/+/set in 1 rosie/ rosie/
 topic spot_width/set in 1 rosie/ rosie/
